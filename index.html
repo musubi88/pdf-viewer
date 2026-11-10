@@ -65,7 +65,7 @@ body.resizing #viewer, body.resizing #sidebar { pointer-events: none; }
 .hint { color: var(--muted); padding: 10px; font-size: 12px; }
 
 /* サムネイル */
-#thumbs { padding: 8px 6px 30px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px 4px; justify-items: center; align-items: end; }
+#thumbs { flex: 1 0 auto; align-content: start; padding: 8px 6px 30px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px 4px; justify-items: center; align-items: end; }
 .thumb { width: 150px; text-align: center; cursor: pointer; position: relative; padding: 5px; border-radius: 6px; border: 2px solid transparent; }
 .thumb .tbox { margin: 0 auto; background: #fff; box-shadow: var(--shadow); display: flex; align-items: center; justify-content: center; }
 .thumb canvas { display: block; }
@@ -240,7 +240,7 @@ dialog label { display: flex; align-items: center; gap: 6px; }
       <button data-tab="search">検索</button>
     </div>
     <div class="pane on" id="pane-thumbs">
-      <div class="hint" style="padding:6px 10px">クリックで選択、Ctrl／Shift+クリックで複数選択。ドラッグでページを並べ替え。</div>
+      <div class="hint" style="padding:6px 10px">クリックで選択、Ctrl／Shift+クリックで複数選択。ドラッグでページを並べ替え。<br>他のPDFをここへドロップ → その位置に結合<br>選択ページをフォルダへドラッグ → PDFとして保存</div>
       <div id="thumbs"></div>
     </div>
     <div class="pane" id="pane-bm">
@@ -388,7 +388,7 @@ const S = {
   selected: new Set(), anchor: null,
   selBm: null,
   dirty: false,
-  undo: [], redo: [],
+  undo: [], redo: [], ver: 0, // ver: 内容を変えるたびに増やす
   gen: 0,
   search: { q: '', results: [], cur: -1, token: 0 },
 };
@@ -525,6 +525,7 @@ function commit(fn, { relayout = true } = {}) {
   const r = fn();
   if (r === false) return;
   S.undo.push(before); if (S.undo.length > 100) S.undo.shift();
+  S.ver++;
   S.redo = [];
   S.dirty = true;
   if (relayout) refreshAll(); else { renderBookmarks(); updateUI(); }
@@ -538,6 +539,7 @@ function redo() {
   S.undo.push(snapshot()); restore(S.redo.pop()); S.dirty = true; afterHistory();
 }
 function afterHistory() {
+  S.ver++;
   const ids = new Set(S.pages.map((p) => p.id));
   S.selected = new Set([...S.selected].filter((id) => ids.has(id)));
   S.current = Math.min(S.current, S.pages.length - 1);
@@ -816,6 +818,29 @@ thumbsEl.addEventListener('click', (e) => {
 });
 function syncThumbSel() {
   [...thumbsEl.children].forEach((t) => t.classList.toggle('sel', S.selected.has(S.pages[+t.dataset.i].id)));
+  scheduleDragOut();
+}
+
+// 選択ページのPDFを先に作っておく（ドラッグ開始時には時間のかかる処理ができないため）
+const dragOut = { key: '', url: null, name: '', timer: 0, gen: 0 };
+const dragOutKey = () => S.pages.filter((p) => S.selected.has(p.id)).map((p) => p.id).join(',') + '|' + S.ver;
+function scheduleDragOut() { clearTimeout(dragOut.timer); dragOut.timer = setTimeout(prepareDragOut, 300); }
+function releaseDragOut() { if (dragOut.url) URL.revokeObjectURL(dragOut.url); dragOut.url = null; dragOut.key = ''; }
+async function prepareDragOut() {
+  const list = S.pages.filter((p) => S.selected.has(p.id));
+  const key = dragOutKey();
+  if (!list.length) { releaseDragOut(); return; }
+  if (key === dragOut.key) return;
+  const gen = ++dragOut.gen;
+  try {
+    const bytes = await buildPdf(list, pruneBookmarks(S.bookmarks, new Set(list.map((p) => p.id))));
+    if (gen !== dragOut.gen) return;
+    releaseDragOut();
+    dragOut.key = key;
+    dragOut.url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    const range = formatRange(list.map((p) => S.pages.indexOf(p))).replace(/\s/g, '').replace(/,/g, '_');
+    dragOut.name = `${baseName(S.fileName)}_p${range}.pdf`.replace(/[:\\/*?"<>|]/g, '_');
+  } catch (e) { console.warn(e); }
 }
 // ドラッグで並べ替え
 let dragIds = null;
@@ -824,21 +849,39 @@ thumbsEl.addEventListener('dragstart', (e) => {
   const id = S.pages[+t.dataset.i].id;
   if (!S.selected.has(id)) { S.selected = new Set([id]); S.anchor = id; syncThumbSel(); }
   dragIds = new Set(S.selected);
-  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.effectAllowed = 'copyMove';
   e.dataTransfer.setData('text/x-pdfv-pages', '1');
+  // エクスプローラーにドロップするとPDFとして保存される（事前に作っておいたファイルを渡す）
+  if (dragOut.url && dragOut.key === dragOutKey()) e.dataTransfer.setData('DownloadURL', `application/pdf:${dragOut.name}:${dragOut.url}`);
 });
 function clearDropMarks() { thumbsEl.querySelectorAll('.drop-before,.drop-after').forEach((t) => t.classList.remove('drop-before', 'drop-after')); }
-thumbsEl.addEventListener('dragover', (e) => {
-  if (!dragIds) return;
-  const t = e.target.closest('.thumb'); if (!t) return;
-  e.preventDefault();
-  clearDropMarks();
+// ドロップ位置：サムネイルの前後、サムネイルのない所なら末尾
+function thumbDropTarget(e) {
+  const t = e.target.closest('.thumb');
+  if (!t) return thumbsEl.lastElementChild ? { t: thumbsEl.lastElementChild, before: false } : null;
   const r = t.getBoundingClientRect();
-  const before = thumbCols() > 1 ? e.clientX < r.left + r.width / 2 : e.clientY < r.top + r.height / 2;
-  t.classList.add(before ? 'drop-before' : 'drop-after');
+  return { t, before: thumbCols() > 1 ? e.clientX < r.left + r.width / 2 : e.clientY < r.top + r.height / 2 };
+}
+thumbsEl.addEventListener('dragover', (e) => {
+  const files = !dragIds && isFileDrag(e) && hasDoc();
+  if (!dragIds && !files) return;
+  const d = thumbDropTarget(e); if (!d) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = files ? 'copy' : 'move';
+  clearDropMarks();
+  d.t.classList.add(d.before ? 'drop-before' : 'drop-after');
 });
 thumbsEl.addEventListener('dragleave', (e) => { if (!thumbsEl.contains(e.relatedTarget)) clearDropMarks(); });
 thumbsEl.addEventListener('drop', (e) => {
+  if (!dragIds && isFileDrag(e) && hasDoc()) { // 他のPDFをドロップした位置に結合
+    e.preventDefault(); e.stopPropagation();
+    const d = thumbDropTarget(e);
+    clearDropMarks(); hideDropOverlay();
+    const files = pdfFiles(e.dataTransfer.files);
+    if (!files.length) { toast('PDFファイルをドロップしてください'); return; }
+    insertFiles(files, d ? +d.t.dataset.i + (d.before ? 0 : 1) : S.pages.length);
+    return;
+  }
   if (!dragIds) return;
   e.preventDefault();
   const t = e.target.closest('.thumb');
@@ -1203,35 +1246,40 @@ $('mergeList').addEventListener('drop', (e) => {
 $('mergeAdd').onclick = () => $('fileMerge').click();
 $('fileMerge').addEventListener('change', (e) => { mergeFiles.push(...e.target.files); e.target.value = ''; renderMergeList(); });
 $('btnMerge').onclick = () => openMergeDialog();
+$('mergeBm').checked = load('pdfv:mergeBm', true);
+$('mergeBm').onchange = () => store('pdfv:mergeBm', $('mergeBm').checked);
 $('mergeOk').onclick = async () => {
-  const files = mergeFiles; const pos = $('mergePos').value; const fileBm = $('mergeBm').checked;
+  const files = mergeFiles; const pos = $('mergePos').value;
   $('dlgMerge').close();
-  if (!hasDoc()) { // 文書を開いていなければ、選んだファイルを結合して新規に開く
-    if (files.length === 1) openDocument(files); else openDocument(files);
-    return;
-  }
+  if (!hasDoc()) { openDocument(files); return; } // 文書を開いていなければ、選んだファイルを結合して新規に開く
+  await insertFiles(files, pos === 'start' ? 0 : pos === 'after' ? S.current + 1 : S.pages.length);
+};
+
+// files を現在の文書の at ページ目の前に挿入する
+async function insertFiles(files, at) {
+  const fileBm = $('mergeBm').checked;
   busy(true, '結合中…');
   try {
     const loaded = [];
     for (const f of files) loaded.push({ f, ...(await loadSource(await readFile(f), f.name)) });
     commit(() => {
       const newPages = loaded.flatMap((l) => l.pages);
-      let newBms = loaded.flatMap((l) => fileBm ? [{ id: uid(), title: baseName(l.f.name), pageId: l.pages[0]?.id ?? null, open: true, children: l.bookmarks }] : l.bookmarks);
+      const newBms = loaded.flatMap((l) => fileBm ? [{ id: uid(), title: baseName(l.f.name), pageId: l.pages[0]?.id ?? null, open: true, children: l.bookmarks, _fileBm: true }] : l.bookmarks);
       if (fileBm && !S.bookmarks.some((b) => b._fileBm)) {
         // 現在の文書もファイル名のしおりでまとめる
         S.bookmarks = [{ id: uid(), title: baseName(S.fileName), pageId: S.pages[0].id, open: true, children: S.bookmarks, _fileBm: true }];
       }
-      newBms.forEach((b) => { if (fileBm) b._fileBm = true; });
-      const at = pos === 'start' ? 0 : pos === 'after' ? S.current + 1 : S.pages.length;
+      // しおりはページ順になる位置に入れる
+      const k = S.bookmarks.findIndex((b) => pageIndexById(b.pageId) >= at);
       S.pages.splice(at, 0, ...newPages);
-      if (pos === 'start') S.bookmarks.unshift(...newBms); else S.bookmarks.push(...newBms);
+      if (k < 0) S.bookmarks.push(...newBms); else S.bookmarks.splice(k, 0, ...newBms);
       S.current = at;
     });
-    toast(`${files.length}個のファイルを結合しました。保存するとファイルに反映されます`, 4000);
+    toast(`${files.length}個のファイル（${loaded.reduce((a, l) => a + l.pages.length, 0)}ページ）を${at + 1}ページ目に挿入しました。保存するとファイルに反映されます`, 4000);
     requestAnimationFrame(() => goTo(S.current));
   } catch (e) { console.error(e); toast('結合できませんでした: ' + e.message, 5000); }
   finally { busy(false); }
-};
+}
 
 // ---------------- しおり ----------------
 function walkBm(list, fn, parent = null) { list.forEach((b, i) => { fn(b, list, i, parent); walkBm(b.children, fn, b); }); }
@@ -1671,16 +1719,27 @@ function rehighlight() { pageEls.forEach((el) => el && highlightPage(el)); }
 
 // ---------------- ドラッグ＆ドロップ ----------------
 const pdfFiles = (fl) => [...fl].filter((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
-let dragDepth = 0;
 const isFileDrag = (e) => e.dataTransfer && e.dataTransfer.types.includes('Files');
-window.addEventListener('dragenter', (e) => {
+// サムネイル欄の上では案内を出さず、サムネイル欄側でドロップ位置を受け付ける
+function overThumbPane(e) {
+  if (!hasDoc() || $('sidebar').classList.contains('hidden') || !$('pane-thumbs').classList.contains('on')) return false;
+  const r = $('pane-thumbs').getBoundingClientRect();
+  return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+}
+let dropHideTimer;
+function hideDropOverlay() {
+  $('drop').classList.remove('show');
+  document.querySelectorAll('#drop .over').forEach((z) => z.classList.remove('over'));
+}
+window.addEventListener('dragover', (e) => {
   if (!isFileDrag(e) || $('dlgMerge').open) return;
-  dragDepth++;
+  e.preventDefault();
   $('drop').classList.toggle('single', !hasDoc());
-  $('drop').classList.add('show');
+  $('drop').classList.toggle('show', !overThumbPane(e));
+  // ウィンドウの外へ出た時やドラッグを中止した時は dragover が止まるので、それで案内を消す
+  clearTimeout(dropHideTimer);
+  dropHideTimer = setTimeout(() => { hideDropOverlay(); clearDropMarks(); }, 250);
 });
-window.addEventListener('dragleave', (e) => { if (!isFileDrag(e)) return; dragDepth--; if (dragDepth <= 0) { dragDepth = 0; $('drop').classList.remove('show'); } });
-window.addEventListener('dragover', (e) => { if (isFileDrag(e)) e.preventDefault(); });
 ['dropOpen', 'dropMerge'].forEach((id) => {
   const z = $(id);
   z.addEventListener('dragover', () => z.classList.add('over'));
@@ -1689,9 +1748,8 @@ window.addEventListener('dragover', (e) => { if (isFileDrag(e)) e.preventDefault
 window.addEventListener('drop', async (e) => {
   if (!isFileDrag(e)) return;
   e.preventDefault();
-  dragDepth = 0; $('drop').classList.remove('show');
   const zone = e.target.closest && e.target.closest('#dropMerge, #dropOpen');
-  document.querySelectorAll('#drop .over').forEach((z) => z.classList.remove('over'));
+  hideDropOverlay();
   const items = [...e.dataTransfer.items];
   const files = pdfFiles(e.dataTransfer.files);
   if (!files.length) { toast('PDFファイルをドロップしてください'); return; }
@@ -1760,6 +1818,7 @@ function updateUI() {
   $('docTitle').textContent = has ? (S.dirty ? '● ' : '') + S.fileName : '';
   $('docTitle').title = has ? S.fileName + (S.dirty ? '（未保存の変更あり）' : '') : '';
   document.title = has ? (S.dirty ? '● ' : '') + S.fileName + ' - PDFビューア' : 'PDFビューア';
+  scheduleDragOut();
 }
 
 function refreshAll() {
