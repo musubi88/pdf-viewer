@@ -1,0 +1,1825 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDFビューア</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<meta name="theme-color" content="#2563eb">
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<style>
+:root {
+  --bg: #f3f4f6; --panel: #ffffff; --panel2: #f8f9fb; --line: #d9dce1; --text: #1f2328; --muted: #6b7280;
+  --accent: #2563eb; --accent-soft: #dbe7ff; --danger: #c62828; --viewer: #e5e7eb; --shadow: 0 1px 4px rgba(0,0,0,.18);
+  --hl: rgba(255, 200, 0, .45); --hl-cur: rgba(255, 110, 0, .6);
+}
+:root[data-theme="dark"] {
+  --bg: #1b1d21; --panel: #24272c; --panel2: #2b2f35; --line: #3a3f46; --text: #e6e8eb; --muted: #9aa1ab;
+  --accent: #5b9bff; --accent-soft: #2a3b5c; --danger: #ff6b6b; --viewer: #15171a; --shadow: 0 1px 4px rgba(0,0,0,.6);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1b1d21; --panel: #24272c; --panel2: #2b2f35; --line: #3a3f46; --text: #e6e8eb; --muted: #9aa1ab;
+    --accent: #5b9bff; --accent-soft: #2a3b5c; --danger: #ff6b6b; --viewer: #15171a; --shadow: 0 1px 4px rgba(0,0,0,.6);
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font: 13px/1.4 "Yu Gothic UI", "Meiryo UI", "Segoe UI", sans-serif; display: flex; flex-direction: column; overflow: hidden; }
+button, input, select { font: inherit; color: inherit; }
+button { background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 4px 9px; cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.on { background: var(--accent-soft); border-color: var(--accent); }
+input[type=text], input[type=search], input[type=number], select { background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; }
+input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* ツールバー */
+#toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
+#toolbar .grp { display: flex; align-items: center; gap: 4px; padding-right: 8px; border-right: 1px solid var(--line); }
+#toolbar .grp:last-child { border-right: 0; }
+#toolbar .spacer { flex: 1; }
+#pageInput { width: 52px; text-align: right; }
+#zoomSel { width: 92px; }
+#searchBox { width: 170px; }
+#docTitle { font-weight: 600; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 本体 */
+#main { flex: 1; display: flex; min-height: 0; }
+#sidebar { width: 250px; flex: none; display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--line); }
+#sidebar.hidden, #sidebar.hidden + #resizer { display: none; }
+#resizer { width: 6px; flex: none; margin-left: -3px; margin-right: -3px; cursor: col-resize; position: relative; z-index: 5; }
+#resizer:hover, #resizer.drag { background: var(--accent); opacity: .5; }
+body.resizing { cursor: col-resize; user-select: none; }
+body.resizing #viewer, body.resizing #sidebar { pointer-events: none; }
+#tabs { display: flex; border-bottom: 1px solid var(--line); }
+#tabs button { flex: 1; border: 0; border-radius: 0; background: transparent; padding: 7px 0; border-bottom: 2px solid transparent; }
+#tabs button.on { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
+.pane { flex: 1; overflow: auto; display: none; min-height: 0; }
+.pane.on { display: flex; flex-direction: column; }
+.pane-tools { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; border-bottom: 1px solid var(--line); background: var(--panel2); position: sticky; top: 0; z-index: 2; }
+.pane-tools button { padding: 3px 7px; }
+.hint { color: var(--muted); padding: 10px; font-size: 12px; }
+
+/* サムネイル */
+#thumbs { padding: 8px 6px 30px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px 4px; justify-items: center; align-items: end; }
+.thumb { width: 150px; text-align: center; cursor: pointer; position: relative; padding: 5px; border-radius: 6px; border: 2px solid transparent; }
+.thumb .tbox { margin: 0 auto; background: #fff; box-shadow: var(--shadow); display: flex; align-items: center; justify-content: center; }
+.thumb canvas { display: block; }
+.thumb .tnum { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.thumb.cur .tnum { color: var(--accent); font-weight: 700; }
+.thumb.sel { background: var(--accent-soft); border-color: var(--accent); }
+.thumb.drop-before::before, .thumb.drop-after::after { content: ""; position: absolute; left: 6px; right: 6px; height: 3px; background: var(--accent); border-radius: 2px; }
+.thumb.drop-before::before { top: -6px; }
+.thumb.drop-after::after { bottom: -6px; }
+/* 複数列のときは左右に縦線を出す */
+#thumbs.multi .thumb.drop-before::before, #thumbs.multi .thumb.drop-after::after { top: 6px; bottom: 6px; left: auto; right: auto; width: 3px; height: auto; }
+#thumbs.multi .thumb.drop-before::before { left: -4px; }
+#thumbs.multi .thumb.drop-after::after { right: -4px; }
+
+/* しおり */
+#bmTree { padding: 4px 0 30px; }
+#bmTree ul { list-style: none; margin: 0; padding-left: 14px; }
+#bmTree > ul { padding-left: 4px; }
+.bm-row { display: flex; align-items: flex-start; gap: 2px; padding: 3px 4px; border-radius: 4px; cursor: pointer; }
+.bm-row:hover { background: var(--panel2); }
+.bm-row.sel { background: var(--accent-soft); }
+.bm-tog { width: 16px; flex: none; color: var(--muted); text-align: center; user-select: none; }
+.bm-title { flex: 1; word-break: break-all; }
+.bm-page { color: var(--muted); font-size: 11px; flex: none; padding-left: 4px; }
+.bm-row input { width: 100%; padding: 1px 4px; }
+.bm-nodest .bm-title { color: var(--muted); font-style: italic; }
+
+/* 検索結果 */
+#searchResults .sr { padding: 6px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
+#searchResults .sr:hover { background: var(--panel2); }
+#searchResults .sr.cur { background: var(--accent-soft); }
+#searchResults .sr b { color: var(--accent); }
+#searchResults .sr mark { background: var(--hl); color: inherit; }
+
+/* ビューア */
+#viewer { flex: 1; overflow: auto; background: var(--viewer); position: relative; outline: none; }
+#pages { padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 14px; min-width: min-content; }
+.row { display: flex; gap: 8px; justify-content: center; }
+.page { position: relative; background: #fff; box-shadow: var(--shadow); flex: none; }
+.page canvas { display: block; position: absolute; left: 0; top: 0; }
+.page .pnum { position: absolute; right: 100%; top: 0; margin-right: 6px; font-size: 11px; color: var(--muted); }
+body.invert .page canvas, body.invert .thumb canvas { filter: invert(1) hue-rotate(180deg); }
+body.invert .page, body.invert .thumb .tbox { background: #000; }
+#empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted); text-align: center; pointer-events: none; }
+#empty .big { font-size: 18px; color: var(--text); }
+#empty button { pointer-events: auto; }
+
+/* PDF.js テキストレイヤー（選択・検索用） */
+.textLayer { position: absolute; text-align: initial; inset: 0; overflow: hidden; line-height: 1; text-size-adjust: none; forced-color-adjust: none; transform-origin: 0 0; z-index: 2; }
+.textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
+.textLayer span.markedContent { top: 0; height: 0; }
+.textLayer ::selection { background: rgba(37, 99, 235, .35); }
+.textLayer[data-main-rotation="90"] { transform: rotate(90deg) translateY(-100%); }
+.textLayer[data-main-rotation="180"] { transform: rotate(180deg) translate(-100%, -100%); }
+.textLayer[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }
+.textLayer span.hl { background: var(--hl); border-radius: 2px; }
+.textLayer span.hl-cur { background: var(--hl-cur); }
+
+/* ドロップ・ダイアログ・通知 */
+#drop { position: fixed; inset: 0; display: none; z-index: 50; background: rgba(20, 30, 50, .55); padding: 30px; gap: 20px; }
+#drop.show { display: flex; }
+#drop div { flex: 1; border: 3px dashed #fff; border-radius: 14px; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 22px; font-weight: 600; text-align: center; }
+#drop div.over { background: rgba(255, 255, 255, .18); }
+#drop.single #dropMerge { display: none; }
+dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); padding: 0; width: min(560px, calc(100vw - 32px)); box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+dialog::backdrop { background: rgba(0, 0, 0, .35); }
+dialog h2 { margin: 0; padding: 12px 16px; font-size: 15px; border-bottom: 1px solid var(--line); }
+dialog .body { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow: auto; }
+dialog .foot { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); }
+dialog label { display: flex; align-items: center; gap: 6px; }
+.flist { border: 1px solid var(--line); border-radius: 6px; min-height: 60px; max-height: 260px; overflow: auto; }
+.flist .fi { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+.flist .fi:last-child { border-bottom: 0; }
+.flist .fi .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flist .fi.fixed { background: var(--panel2); font-weight: 600; }
+.flist .fi button { padding: 1px 6px; }
+.auto-list { border: 1px solid var(--line); border-radius: 6px; max-height: 46vh; overflow: auto; }
+.auto-row { display: flex; gap: 8px; padding: 3px 8px; border-bottom: 1px solid var(--line); }
+.auto-row:last-child { border-bottom: 0; }
+.auto-row .t { flex: 1; word-break: break-all; }
+.auto-row .p { flex: none; color: var(--muted); }
+.auto-row.est .p, .auto-row.warn .p { color: var(--danger); font-weight: 700; }
+.auto-notes { margin: 0; padding-left: 18px; color: var(--danger); }
+.keys { border-collapse: collapse; width: 100%; }
+.keys td { padding: 3px 6px; border-bottom: 1px solid var(--line); }
+.keys td:first-child { white-space: nowrap; font-family: Consolas, monospace; color: var(--accent); }
+#toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #222; color: #fff; padding: 8px 16px; border-radius: 6px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 60; max-width: 80vw; }
+#toast.show { opacity: .95; }
+#busy { position: fixed; inset: 0; background: rgba(0,0,0,.25); display: none; align-items: center; justify-content: center; z-index: 70; color: #fff; font-size: 16px; }
+#busy.show { display: flex; }
+#busy span { background: rgba(0,0,0,.7); padding: 12px 22px; border-radius: 8px; }
+
+/* 印刷：画面の要素は隠し、ページ画像だけを1枚ずつ出す */
+#printArea { display: none; }
+@page port { size: portrait; margin: 4mm; }
+@page land { size: landscape; margin: 4mm; }
+@media print {
+  html, body { height: auto; overflow: visible; display: block; background: #fff; }
+  body > *:not(#printArea) { display: none !important; }
+  #printArea { display: block; }
+  #printArea:empty::before { content: "印刷はツールバーの［印刷］ボタン（Ctrl+P）から行ってください。"; }
+  .pp { height: 100vh; display: flex; align-items: center; justify-content: center; break-after: page; overflow: hidden; }
+  .pp:last-child { break-after: auto; }
+  .pp.port { page: port; }
+  .pp.land { page: land; }
+  .pp img { max-width: 100%; max-height: 100%; }
+}
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <div class="grp">
+    <button id="btnSidebar" title="サイドバーの表示切替 (F4)">☰</button>
+    <button id="btnOpen" title="開く (Ctrl+O)">📂 開く</button>
+    <button id="btnSave" title="上書き保存 (Ctrl+S)" disabled>💾 保存</button>
+    <button id="btnSaveAs" title="名前を付けて保存 (Ctrl+Shift+S)" disabled>名前を付けて保存</button>
+    <button id="btnPrint" title="印刷 (Ctrl+P)" disabled>🖨 印刷</button>
+  </div>
+  <div class="grp">
+    <button id="btnMerge" title="他のPDFを結合">📎 結合</button>
+    <button id="btnExtract" title="ページを抽出して別ファイルに保存" disabled>✂ 抽出</button>
+    <button id="btnDelete" title="選択ページを削除 (Delete)" disabled>🗑 削除</button>
+    <button id="btnRotL" title="選択ページを左回転" disabled>⟲</button>
+    <button id="btnRotR" title="選択ページを右回転" disabled>⟳</button>
+    <button id="btnUndo" title="元に戻す (Ctrl+Z)" disabled>↶</button>
+    <button id="btnRedo" title="やり直し (Ctrl+Y)" disabled>↷</button>
+  </div>
+  <div class="grp">
+    <button id="btnPrev" title="前のページ (←)">◀</button>
+    <input id="pageInput" type="text" value="0" title="ページ番号を入力してEnter">
+    <span id="pageCount">/ 0</span>
+    <button id="btnNext" title="次のページ (→)">▶</button>
+  </div>
+  <div class="grp">
+    <button id="btnZoomOut" title="縮小 (Ctrl+-)">－</button>
+    <select id="zoomSel" title="倍率">
+      <option value="width">幅に合わせる</option>
+      <option value="page">全体を表示</option>
+      <option value="0.5">50%</option><option value="0.75">75%</option><option value="1">100%</option>
+      <option value="1.25">125%</option><option value="1.5">150%</option><option value="2">200%</option>
+      <option value="3">300%</option><option value="4">400%</option>
+      <option value="custom" hidden>--</option>
+    </select>
+    <button id="btnZoomIn" title="拡大 (Ctrl++)">＋</button>
+    <select id="viewSel" title="ページの並べ方">
+      <option value="single">単ページ</option>
+      <option value="spread">見開き</option>
+      <option value="cover">見開き（表紙）</option>
+    </select>
+  </div>
+  <div class="grp">
+    <input id="searchBox" type="search" placeholder="検索 (Ctrl+F)">
+    <button id="btnSearchPrev" title="前を検索 (Shift+Enter)">▲</button>
+    <button id="btnSearchNext" title="次を検索 (Enter)">▼</button>
+  </div>
+  <div class="grp">
+    <button id="btnInvert" title="ページの色を反転（夜間用）">◐ 反転</button>
+    <button id="btnTheme" title="画面テーマ（自動／ライト／ダーク）">🌓 自動</button>
+    <button id="btnFull" title="全画面 (F11)">⛶</button>
+    <button id="btnHelp" title="ショートカット一覧">？</button>
+  </div>
+  <div class="spacer"></div>
+  <div id="docTitle"></div>
+</div>
+
+<div id="main">
+  <aside id="sidebar">
+    <div id="tabs">
+      <button data-tab="thumbs" class="on">サムネイル</button>
+      <button data-tab="bm">しおり</button>
+      <button data-tab="search">検索</button>
+    </div>
+    <div class="pane on" id="pane-thumbs">
+      <div class="hint" style="padding:6px 10px">クリックで選択、Ctrl／Shift+クリックで複数選択。ドラッグでページを並べ替え。</div>
+      <div id="thumbs"></div>
+    </div>
+    <div class="pane" id="pane-bm">
+      <div class="pane-tools">
+        <button id="bmAuto" class="primary" title="報告書の目次と本文の見出しからしおりを自動で作成します">⚡ 自動作成</button>
+        <button id="bmAdd" title="現在のページにしおりを追加 (Ctrl+B)。テキストを選択していればその文字を名前にします">＋ 追加</button>
+        <button id="bmRename" title="名前を変更 (F2 / ダブルクリック)">名前変更</button>
+        <button id="bmSetDest" title="選択中のしおりの移動先を現在のページにする">移動先を現在に</button>
+        <button id="bmDel" title="削除">削除</button>
+        <button id="bmUp" title="上へ">↑</button>
+        <button id="bmDown" title="下へ">↓</button>
+        <button id="bmOut" title="階層を上げる">←</button>
+        <button id="bmIn" title="階層を下げる（前のしおりの子にする）">→</button>
+        <button id="bmExpand" title="すべて展開／折りたたみ">±</button>
+      </div>
+      <div id="bmTree"></div>
+    </div>
+    <div class="pane" id="pane-search">
+      <div id="searchInfo" class="hint">ツールバーの検索欄に入力してEnterを押してください。</div>
+      <div id="searchResults"></div>
+    </div>
+  </aside>
+  <div id="resizer" title="ドラッグで幅を変更（ダブルクリックで元の幅）"></div>
+  <div id="viewer" tabindex="0">
+    <div id="pages"></div>
+    <div id="empty">
+      <div class="big">PDFをここにドラッグ＆ドロップ</div>
+      <div>複数のファイルをまとめてドロップすると結合して開きます</div>
+      <button class="primary" id="btnOpen2">PDFを開く</button>
+    </div>
+  </div>
+</div>
+
+<div id="drop"><div id="dropOpen">ここにドロップして<br>開く</div><div id="dropMerge">ここにドロップして<br>現在の文書に結合</div></div>
+
+<dialog id="dlgMerge">
+  <h2>PDFの結合</h2>
+  <div class="body">
+    <div>結合するファイルを追加し、順番を整えてください。</div>
+    <div class="flist" id="mergeList"></div>
+    <div><button id="mergeAdd">＋ ファイルを追加…</button></div>
+    <label>挿入位置
+      <select id="mergePos">
+        <option value="end">現在の文書の末尾</option>
+        <option value="after">現在のページの後ろ</option>
+        <option value="start">現在の文書の先頭</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="mergeBm" checked> ファイル名のしおりを作成する（各ファイルのしおりはその下に入れる）</label>
+  </div>
+  <div class="foot"><button data-close>キャンセル</button><button class="primary" id="mergeOk">結合</button></div>
+</dialog>
+
+<dialog id="dlgExtract">
+  <h2>ページの抽出</h2>
+  <div class="body">
+    <label>ページ <input type="text" id="exRange" style="flex:1" placeholder="例: 1-3, 5, 8-"></label>
+    <div class="hint" style="padding:0">サムネイルで選択したページが入力されています。「8-」は8ページから最後まで。</div>
+    <label><input type="radio" name="exMode" value="one" checked> 1つのPDFにまとめる</label>
+    <label><input type="radio" name="exMode" value="each"> 1ページずつ別々のPDFにする（保存先フォルダを選択）</label>
+    <label><input type="checkbox" id="exBm" checked> 対象ページへのしおりを含める</label>
+    <label><input type="checkbox" id="exDel"> 抽出後、元の文書からそのページを削除する</label>
+  </div>
+  <div class="foot"><button data-close>キャンセル</button><button class="primary" id="exOk">抽出して保存</button></div>
+</dialog>
+
+<dialog id="dlgPrint">
+  <h2>印刷</h2>
+  <div class="body">
+    <label><input type="radio" name="prMode" value="all" checked> すべてのページ</label>
+    <label><input type="radio" name="prMode" value="cur"> 現在のページ</label>
+    <label><input type="radio" name="prMode" value="sel" id="prSelOpt"> サムネイルで選択したページ</label>
+    <label><input type="radio" name="prMode" value="range"> ページ指定 <input type="text" id="prRange" style="flex:1" placeholder="例: 1-3, 5, 8-"></label>
+    <label>画質
+      <select id="prDpi">
+        <option value="150">標準（150dpi）</option>
+        <option value="300">高画質（300dpi・図面向け、時間がかかります）</option>
+      </select>
+    </label>
+    <div class="hint" style="padding:0">次に開く印刷画面で、プリンター・用紙サイズ・部数を選べます。縦長と横長のページは、それぞれ用紙の向きを合わせて印刷します。</div>
+  </div>
+  <div class="foot"><button data-close>キャンセル</button><button class="primary" id="prOk">印刷へ進む</button></div>
+</dialog>
+
+<dialog id="dlgAuto">
+  <h2>しおりの自動作成</h2>
+  <div class="body">
+    <div id="autoSummary"></div>
+    <ul class="auto-notes" id="autoNotes"></ul>
+    <div class="auto-list" id="autoList"></div>
+  </div>
+  <div class="foot"><button data-close>キャンセル</button><button class="primary" id="autoOk">このしおりを作成</button></div>
+</dialog>
+
+<dialog id="dlgHelp">
+  <h2>操作方法</h2>
+  <div class="body">
+    <table class="keys">
+      <tr><td>Ctrl+O</td><td>開く</td></tr>
+      <tr><td>Ctrl+S / Ctrl+Shift+S</td><td>上書き保存 ／ 名前を付けて保存</td></tr>
+      <tr><td>Ctrl+P</td><td>印刷</td></tr>
+      <tr><td>← → / PageUp PageDown</td><td>前／次のページ</td></tr>
+      <tr><td>Home / End</td><td>最初／最後のページ</td></tr>
+      <tr><td>Ctrl+ホイール, Ctrl++ / Ctrl+-</td><td>拡大／縮小</td></tr>
+      <tr><td>Ctrl+0</td><td>幅に合わせる</td></tr>
+      <tr><td>Ctrl+F, Enter / Shift+Enter</td><td>検索、次／前を検索</td></tr>
+      <tr><td>Ctrl+B</td><td>現在のページにしおりを追加（選択中の文字が名前になる）</td></tr>
+      <tr><td>F2</td><td>しおりの名前変更</td></tr>
+      <tr><td>Delete</td><td>サムネイルで選択したページを削除</td></tr>
+      <tr><td>Ctrl+A</td><td>（サムネイル上）全ページを選択</td></tr>
+      <tr><td>Ctrl+Z / Ctrl+Y</td><td>元に戻す／やり直し</td></tr>
+      <tr><td>F4</td><td>サイドバーの表示切替</td></tr>
+      <tr><td>Esc</td><td>ページ選択の解除</td></tr>
+    </table>
+    <div class="hint" style="padding:0">ページの削除・回転・並べ替え・結合・しおりの変更は「保存」するまでファイルには反映されません。前回見ていたページと倍率はファイルごとに記憶されます。</div>
+  </div>
+  <div class="foot"><button class="primary" data-close>閉じる</button></div>
+</dialog>
+
+<input type="file" id="fileOpen" accept="application/pdf,.pdf" multiple hidden>
+<input type="file" id="fileMerge" accept="application/pdf,.pdf" multiple hidden>
+<div id="toast"></div>
+<div id="busy"><span id="busyMsg">処理中…</span></div>
+<div id="printArea"></div>
+
+<script>
+'use strict';
+const PDFJS_BASE = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/';
+pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + 'build/pdf.worker.min.js';
+const { PDFDocument, PDFName, PDFHexString, degrees } = PDFLib;
+
+const $ = (id) => document.getElementById(id);
+const viewer = $('viewer'), pagesEl = $('pages'), thumbsEl = $('thumbs');
+let uidSeq = 1;
+const uid = () => uidSeq++;
+
+// ---------------- 状態 ----------------
+const S = {
+  sources: [],        // { name, bytes, pdfjs, lib, sizes:[{w,h,rotate}], encrypted }
+  pages: [],          // { id, src, idx, rot }
+  bookmarks: [],      // { id, title, pageId, open, children }
+  fileName: '', fileHandle: null, fileKey: '',
+  scale: 1, fit: 'width', view: 'single',
+  current: 0,
+  selected: new Set(), anchor: null,
+  selBm: null,
+  dirty: false,
+  undo: [], redo: [],
+  gen: 0,
+  search: { q: '', results: [], cur: -1, token: 0 },
+};
+const textCache = new Map();  // `${src}:${idx}` -> 正規化済みテキスト
+const thumbCache = new Map(); // pageId -> { canvas, rot }
+
+// ---------------- 共通UI ----------------
+let toastTimer;
+function toast(msg, ms = 2600) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+function busy(on, msg = '処理中…') { $('busyMsg').textContent = msg; $('busy').classList.toggle('show', on); }
+function store(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
+function load(key, def) { try { const v = localStorage.getItem(key); return v == null ? def : JSON.parse(v); } catch { return def; } }
+const baseName = (n) => (n || '文書').replace(/\.pdf$/i, '');
+const hasDoc = () => S.pages.length > 0;
+const pageIndexById = (id) => S.pages.findIndex((p) => p.id === id);
+document.querySelectorAll('dialog [data-close]').forEach((b) => b.addEventListener('click', () => b.closest('dialog').close()));
+
+// ---------------- 読み込み ----------------
+async function loadSource(bytes, name) {
+  const task = pdfjsLib.getDocument({
+    data: bytes.slice(),
+    cMapUrl: PDFJS_BASE + 'cmaps/', cMapPacked: true,
+    standardFontDataUrl: PDFJS_BASE + 'standard_fonts/',
+  });
+  let encrypted = false;
+  task.onPassword = (cb, reason) => {
+    encrypted = true;
+    const pw = prompt((reason === 2 ? 'パスワードが違います。' : '') + `「${name}」のパスワードを入力してください`);
+    if (pw == null) task.destroy(); else cb(pw);
+  };
+  const pdf = await task.promise;
+  const sizes = await Promise.all(Array.from({ length: pdf.numPages }, async (_, i) => {
+    const p = await pdf.getPage(i + 1);
+    const vp = p.getViewport({ scale: 1, rotation: 0 });
+    return { w: vp.width, h: vp.height, rotate: p.rotate };
+  }));
+  const src = { name, bytes, pdfjs: pdf, lib: null, sizes, encrypted };
+  S.sources.push(src);
+  const srcIdx = S.sources.length - 1;
+  const pages = sizes.map((_, i) => ({ id: uid(), src: srcIdx, idx: i, rot: 0 }));
+  const bookmarks = await readOutline(pdf, pages.map((p) => p.id));
+  return { pages, bookmarks };
+}
+
+async function readOutline(pdf, pageIds) {
+  let ol;
+  try { ol = await pdf.getOutline(); } catch { return []; }
+  if (!ol) return [];
+  async function conv(items) {
+    const out = [];
+    for (const it of items) {
+      let pageId = null;
+      try {
+        let d = it.dest;
+        if (typeof d === 'string') d = await pdf.getDestination(d);
+        if (Array.isArray(d) && d[0] != null) {
+          const idx = typeof d[0] === 'object' ? await pdf.getPageIndex(d[0]) : d[0];
+          pageId = pageIds[idx] ?? null;
+        }
+      } catch {}
+      out.push({ id: uid(), title: it.title || '(無題)', pageId, open: !(it.count < 0), children: await conv(it.items || []) });
+    }
+    return out;
+  }
+  return conv(ol);
+}
+
+async function readFile(file) { return new Uint8Array(await file.arrayBuffer()); }
+
+async function openDocument(files, handle = null) {
+  if (!files.length) return;
+  if (S.dirty && !confirm('保存されていない変更があります。破棄して開きますか？')) return;
+  busy(true, '読み込み中…');
+  try {
+    resetState();
+    for (const f of files) {
+      const r = await loadSource(await readFile(f), f.name);
+      if (files.length > 1) {
+        S.bookmarks.push({ id: uid(), title: baseName(f.name), pageId: r.pages[0]?.id ?? null, open: true, children: r.bookmarks });
+      } else {
+        S.bookmarks.push(...r.bookmarks);
+      }
+      S.pages.push(...r.pages);
+    }
+    S.fileName = files.length > 1 ? baseName(files[0].name) + '_結合.pdf' : files[0].name;
+    S.fileHandle = files.length > 1 ? null : handle;
+    S.fileKey = files.length > 1 ? '' : 'pdfv:' + files[0].name + ':' + files[0].size;
+    S.dirty = files.length > 1;
+    const saved = S.fileKey ? load(S.fileKey, null) : null;
+    if (saved) { S.fit = saved.fit ?? null; S.scale = saved.scale || 1; }
+    else { S.fit = load('pdfv:fit', 'width'); S.scale = load('pdfv:scale', 1); }
+    if (S.bookmarks.length) switchTab('bm');
+    refreshAll();
+    const startPage = saved ? Math.min(saved.page || 0, S.pages.length - 1) : 0;
+    requestAnimationFrame(() => goTo(startPage, false));
+    if (saved && saved.page > 0) toast(`前回の続き（${startPage + 1}ページ）から表示しています`);
+  } catch (e) {
+    console.error(e); resetState(); refreshAll();
+    toast('開けませんでした: ' + (e && e.message || e), 5000);
+  } finally { busy(false); }
+}
+
+function resetState() {
+  S.sources.forEach((s) => s.pdfjs && s.pdfjs.destroy());
+  S.sources = []; S.pages = []; S.bookmarks = [];
+  S.selected.clear(); S.anchor = null; S.selBm = null;
+  S.undo = []; S.redo = []; S.dirty = false; S.current = 0;
+  S.fileHandle = null; S.fileName = ''; S.fileKey = '';
+  textCache.clear(); thumbCache.clear();
+  clearSearch();
+}
+
+async function pickOpen() {
+  if (window.showOpenFilePicker) {
+    try {
+      const hs = await showOpenFilePicker({ multiple: true, types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }] });
+      const files = await Promise.all(hs.map((h) => h.getFile()));
+      openDocument(files, hs.length === 1 ? hs[0] : null);
+    } catch (e) { if (e.name !== 'AbortError') toast(e.message); }
+  } else $('fileOpen').click();
+}
+$('fileOpen').addEventListener('change', (e) => { openDocument([...e.target.files]); e.target.value = ''; });
+$('btnOpen').onclick = pickOpen;
+$('btnOpen2').onclick = pickOpen;
+
+// ---------------- 元に戻す ----------------
+function snapshot() { return JSON.stringify({ pages: S.pages, bookmarks: S.bookmarks }); }
+function restore(snap) { const o = JSON.parse(snap); S.pages = o.pages; S.bookmarks = o.bookmarks; }
+function commit(fn, { relayout = true } = {}) {
+  const before = snapshot();
+  const r = fn();
+  if (r === false) return;
+  S.undo.push(before); if (S.undo.length > 100) S.undo.shift();
+  S.redo = [];
+  S.dirty = true;
+  if (relayout) refreshAll(); else { renderBookmarks(); updateUI(); }
+}
+function undo() {
+  if (!S.undo.length) return;
+  S.redo.push(snapshot()); restore(S.undo.pop()); S.dirty = true; afterHistory();
+}
+function redo() {
+  if (!S.redo.length) return;
+  S.undo.push(snapshot()); restore(S.redo.pop()); S.dirty = true; afterHistory();
+}
+function afterHistory() {
+  const ids = new Set(S.pages.map((p) => p.id));
+  S.selected = new Set([...S.selected].filter((id) => ids.has(id)));
+  S.current = Math.min(S.current, S.pages.length - 1);
+  refreshAll();
+}
+$('btnUndo').onclick = undo;
+$('btnRedo').onclick = redo;
+
+// ---------------- 表示（レイアウト・描画） ----------------
+function dispSize(p) {
+  const s = S.sources[p.src].sizes[p.idx];
+  const r = (s.rotate + p.rot) % 360;
+  return r % 180 ? { w: s.h, h: s.w } : { w: s.w, h: s.h };
+}
+
+function computeFitScale(mode) {
+  if (!hasDoc()) return 1;
+  const p = S.pages[Math.max(0, S.current)];
+  const d = dispSize(p);
+  let w = d.w, h = d.h;
+  if (S.view !== 'single') {
+    // 見開きの場合は2ページ分の幅
+    const row = rows().find((r) => r.includes(S.current)) || [S.current];
+    w = row.reduce((a, i) => a + dispSize(S.pages[i]).w, 0) + (row.length - 1) * 8;
+    h = Math.max(...row.map((i) => dispSize(S.pages[i]).h));
+  }
+  const availW = viewer.clientWidth - 32 - 24;
+  const availH = viewer.clientHeight - 32;
+  if (availW <= 0 || availH <= 0) return S.scale > 0 ? S.scale : 1; // 画面が非表示のとき
+  const sw = availW / w;
+  return Math.max(0.1, mode === 'page' ? Math.min(sw, availH / h) : sw);
+}
+
+function rows() {
+  const n = S.pages.length, out = [];
+  if (S.view === 'single') { for (let i = 0; i < n; i++) out.push([i]); return out; }
+  let i = 0;
+  if (S.view === 'cover' && n) { out.push([0]); i = 1; }
+  for (; i < n; i += 2) out.push(i + 1 < n ? [i, i + 1] : [i]);
+  return out;
+}
+
+let pageObserver;
+let pageEls = [];
+function layout(keepPos = true) {
+  const anchor = keepPos ? captureScroll() : null;
+  if (S.fit) S.scale = computeFitScale(S.fit);
+  S.gen++;
+  if (pageObserver) pageObserver.disconnect();
+  pageObserver = new IntersectionObserver(onPageVisible, { root: viewer, rootMargin: '150% 0px' });
+  pagesEl.innerHTML = '';
+  pageEls = [];
+  for (const r of rows()) {
+    const row = document.createElement('div'); row.className = 'row';
+    for (const i of r) {
+      const p = S.pages[i];
+      const d = dispSize(p);
+      const el = document.createElement('div');
+      el.className = 'page';
+      el.style.width = Math.floor(d.w * S.scale) + 'px';
+      el.style.height = Math.floor(d.h * S.scale) + 'px';
+      el.style.setProperty('--scale-factor', S.scale);
+      el.dataset.i = i;
+      if (S.view === 'single') { const n = document.createElement('div'); n.className = 'pnum'; n.textContent = i + 1; el.appendChild(n); }
+      row.appendChild(el);
+      pageEls[i] = el;
+      pageObserver.observe(el);
+    }
+    pagesEl.appendChild(row);
+  }
+  $('empty').style.display = hasDoc() ? 'none' : '';
+  if (anchor) restoreScroll(anchor);
+}
+
+function onPageVisible(entries) {
+  for (const en of entries) {
+    const el = en.target;
+    if (en.isIntersecting) renderPage(el);
+    else if (el._gen) { // 画面から遠いページはメモリ節約のため解放
+      if (el._task) el._task.cancel();
+      el.querySelectorAll('canvas,.textLayer').forEach((c) => c.remove());
+      el._gen = 0;
+    }
+  }
+}
+
+async function renderPage(el) {
+  const gen = S.gen;
+  if (el._gen === gen) return;
+  el._gen = gen;
+  const p = S.pages[+el.dataset.i];
+  if (!p) return;
+  const src = S.sources[p.src];
+  try {
+    const page = await src.pdfjs.getPage(p.idx + 1);
+    if (el._gen !== gen) return;
+    const rotation = (page.rotate + p.rot) % 360;
+    const vp = page.getViewport({ scale: S.scale, rotation });
+    let ratio = window.devicePixelRatio || 1;
+    const maxPx = 16e6; // 巨大な図面でキャンバスが作れなくなるのを防ぐ
+    if (vp.width * vp.height * ratio * ratio > maxPx) ratio = Math.sqrt(maxPx / (vp.width * vp.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(vp.width * ratio); canvas.height = Math.floor(vp.height * ratio);
+    canvas.style.width = Math.floor(vp.width) + 'px'; canvas.style.height = Math.floor(vp.height) + 'px';
+    const task = page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : null });
+    el._task = task;
+    await task.promise;
+    if (el._gen !== gen) return;
+    el.querySelectorAll('canvas,.textLayer').forEach((c) => c.remove());
+    el.appendChild(canvas);
+    const tl = document.createElement('div'); tl.className = 'textLayer';
+    el.appendChild(tl);
+    const textDivs = [];
+    await pdfjsLib.renderTextLayer({ textContentSource: await page.getTextContent(), container: tl, viewport: vp, textDivs }).promise;
+    el._textDivs = textDivs;
+    highlightPage(el);
+  } catch (e) {
+    if (e && e.name === 'RenderingCancelledException') return;
+    console.error(e);
+  }
+}
+
+function captureScroll() {
+  if (!hasDoc()) return null;
+  const i = Math.max(0, S.current);
+  const el = pageEls[i];
+  if (!el) return { i, frac: 0 };
+  const frac = (viewer.scrollTop - pageTop(el)) / el.offsetHeight;
+  return { i, frac: Math.max(-0.1, Math.min(1, frac)), left: viewer.scrollLeft / Math.max(1, viewer.scrollWidth) };
+}
+function restoreScroll(a) {
+  const el = pageEls[Math.min(a.i, pageEls.length - 1)];
+  if (!el) return;
+  viewer.scrollTop = pageTop(el) + a.frac * el.offsetHeight;
+  if (a.left != null) viewer.scrollLeft = a.left * viewer.scrollWidth;
+  updateCurrent();
+}
+function pageTop(el) { return el.parentElement.offsetTop; }
+
+function goTo(i, smooth = false) {
+  if (!hasDoc()) return;
+  i = Math.max(0, Math.min(S.pages.length - 1, i));
+  const el = pageEls[i];
+  if (!el) return;
+  viewer.scrollTo({ top: pageTop(el) - 10, behavior: smooth ? 'smooth' : 'auto' });
+  setCurrent(i);
+}
+
+function updateCurrent() {
+  if (!hasDoc()) return;
+  const y = viewer.scrollTop + viewer.clientHeight * 0.3;
+  let lo = 0, hi = pageEls.length - 1, ans = 0;
+  while (lo <= hi) { // 上端がy以下の最後のページを二分探索
+    const mid = (lo + hi) >> 1;
+    if (pageTop(pageEls[mid]) <= y) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  // 見開きでは行の先頭ページ
+  setCurrent(+pageEls[ans].parentElement.firstChild.dataset.i);
+}
+function setCurrent(i) {
+  if (S.current === i) return;
+  S.current = i;
+  $('pageInput').value = i + 1;
+  document.querySelectorAll('.thumb.cur').forEach((t) => t.classList.remove('cur'));
+  const t = thumbsEl.children[i];
+  if (t) { t.classList.add('cur'); if (!isInView(t, $('pane-thumbs'))) t.scrollIntoView({ block: 'nearest' }); }
+  saveViewState();
+}
+function isInView(el, box) {
+  const a = el.getBoundingClientRect(), b = box.getBoundingClientRect();
+  return a.top >= b.top && a.bottom <= b.bottom;
+}
+let scrollRaf = 0;
+viewer.addEventListener('scroll', () => {
+  if (scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; updateCurrent(); });
+});
+
+let saveTimer;
+function saveViewState() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    if (S.fileKey) store(S.fileKey, { page: S.current, scale: S.scale, fit: S.fit });
+  }, 400);
+}
+
+// ---------------- 倍率 ----------------
+const ZOOMS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5, 6];
+function setZoom(scale, fit = null) {
+  S.fit = fit;
+  if (!fit) S.scale = Math.max(0.1, Math.min(8, scale));
+  store('pdfv:fit', S.fit); store('pdfv:scale', S.scale);
+  layout(); updateUI(); saveViewState();
+}
+function zoomStep(dir) {
+  const cur = S.scale;
+  const next = dir > 0 ? ZOOMS.find((z) => z > cur + 0.001) : [...ZOOMS].reverse().find((z) => z < cur - 0.001);
+  if (next) setZoom(next);
+}
+$('btnZoomIn').onclick = () => zoomStep(1);
+$('btnZoomOut').onclick = () => zoomStep(-1);
+$('zoomSel').onchange = (e) => {
+  const v = e.target.value;
+  if (v === 'width' || v === 'page') setZoom(0, v); else if (v !== 'custom') setZoom(+v);
+};
+$('viewSel').onchange = (e) => { S.view = e.target.value; store('pdfv:view', S.view); layout(); };
+viewer.addEventListener('wheel', (e) => {
+  if (!e.ctrlKey || !hasDoc()) return;
+  e.preventDefault();
+  zoomStep(e.deltaY < 0 ? 1 : -1);
+}, { passive: false });
+let resizeTimer;
+new ResizeObserver(() => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (S.fit && hasDoc()) layout(); }, 120);
+}).observe(viewer);
+
+// ---------------- サムネイル ----------------
+let thumbObserver;
+function renderThumbs() {
+  if (thumbObserver) thumbObserver.disconnect();
+  thumbObserver = new IntersectionObserver((ents) => ents.forEach((en) => en.isIntersecting && drawThumb(en.target)), { root: $('pane-thumbs'), rootMargin: '300px 0px' });
+  thumbsEl.innerHTML = '';
+  const live = new Set();
+  S.pages.forEach((p, i) => {
+    live.add(p.id);
+    const d = dispSize(p);
+    const sc = Math.min(130 / d.w, 160 / d.h);
+    const t = document.createElement('div');
+    t.className = 'thumb' + (i === S.current ? ' cur' : '') + (S.selected.has(p.id) ? ' sel' : '');
+    t.dataset.i = i; t.draggable = true;
+    const box = document.createElement('div'); box.className = 'tbox';
+    box.style.width = Math.round(d.w * sc) + 'px'; box.style.height = Math.round(d.h * sc) + 'px';
+    const num = document.createElement('div'); num.className = 'tnum'; num.textContent = i + 1;
+    t.append(box, num);
+    thumbsEl.appendChild(t);
+    const c = thumbCache.get(p.id);
+    if (c && c.rot === p.rot) box.appendChild(c.canvas); else thumbObserver.observe(t);
+  });
+  for (const id of thumbCache.keys()) if (!live.has(id)) thumbCache.delete(id);
+}
+async function drawThumb(t) {
+  thumbObserver.unobserve(t);
+  const p = S.pages[+t.dataset.i];
+  if (!p) return;
+  try {
+    const page = await S.sources[p.src].pdfjs.getPage(p.idx + 1);
+    const box = t.firstChild;
+    const vp0 = page.getViewport({ scale: 1, rotation: (page.rotate + p.rot) % 360 });
+    const sc = Math.min(130 / vp0.width, 160 / vp0.height) * Math.min(2, window.devicePixelRatio || 1);
+    const vp = page.getViewport({ scale: sc, rotation: (page.rotate + p.rot) % 360 });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(vp.width); canvas.height = Math.floor(vp.height);
+    canvas.style.width = box.style.width; canvas.style.height = box.style.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+    thumbCache.set(p.id, { canvas, rot: p.rot });
+    if (t.isConnected) { box.innerHTML = ''; box.appendChild(canvas); }
+  } catch (e) { console.error(e); }
+}
+
+thumbsEl.addEventListener('click', (e) => {
+  const t = e.target.closest('.thumb'); if (!t) return;
+  const i = +t.dataset.i, id = S.pages[i].id;
+  if (e.shiftKey && S.anchor != null) {
+    const a = pageIndexById(S.anchor);
+    if (!e.ctrlKey) S.selected.clear();
+    for (let k = Math.min(a, i); k <= Math.max(a, i); k++) S.selected.add(S.pages[k].id);
+  } else if (e.ctrlKey || e.metaKey) {
+    S.selected.has(id) ? S.selected.delete(id) : S.selected.add(id);
+    S.anchor = id;
+  } else {
+    S.selected = new Set([id]); S.anchor = id;
+    goTo(i);
+  }
+  syncThumbSel(); updateUI();
+});
+function syncThumbSel() {
+  [...thumbsEl.children].forEach((t) => t.classList.toggle('sel', S.selected.has(S.pages[+t.dataset.i].id)));
+}
+// ドラッグで並べ替え
+let dragIds = null;
+thumbsEl.addEventListener('dragstart', (e) => {
+  const t = e.target.closest('.thumb'); if (!t) return;
+  const id = S.pages[+t.dataset.i].id;
+  if (!S.selected.has(id)) { S.selected = new Set([id]); S.anchor = id; syncThumbSel(); }
+  dragIds = new Set(S.selected);
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/x-pdfv-pages', '1');
+});
+function clearDropMarks() { thumbsEl.querySelectorAll('.drop-before,.drop-after').forEach((t) => t.classList.remove('drop-before', 'drop-after')); }
+thumbsEl.addEventListener('dragover', (e) => {
+  if (!dragIds) return;
+  const t = e.target.closest('.thumb'); if (!t) return;
+  e.preventDefault();
+  clearDropMarks();
+  const r = t.getBoundingClientRect();
+  const before = thumbCols() > 1 ? e.clientX < r.left + r.width / 2 : e.clientY < r.top + r.height / 2;
+  t.classList.add(before ? 'drop-before' : 'drop-after');
+});
+thumbsEl.addEventListener('dragleave', (e) => { if (!thumbsEl.contains(e.relatedTarget)) clearDropMarks(); });
+thumbsEl.addEventListener('drop', (e) => {
+  if (!dragIds) return;
+  e.preventDefault();
+  const t = e.target.closest('.thumb');
+  const after = t && t.classList.contains('drop-after');
+  clearDropMarks();
+  if (!t) return;
+  const targetId = S.pages[+t.dataset.i].id;
+  const ids = dragIds;
+  if (ids.has(targetId)) return;
+  commit(() => {
+    const moving = S.pages.filter((p) => ids.has(p.id));
+    const rest = S.pages.filter((p) => !ids.has(p.id));
+    let pos = rest.findIndex((p) => p.id === targetId) + (after ? 1 : 0);
+    rest.splice(pos, 0, ...moving);
+    S.pages = rest;
+    S.current = pageIndexById(moving[0].id);
+  });
+  toast(`${ids.size}ページを移動しました`);
+});
+thumbsEl.addEventListener('dragend', () => { dragIds = null; clearDropMarks(); });
+function thumbCols() { return getComputedStyle(thumbsEl).gridTemplateColumns.split(' ').length; }
+new ResizeObserver(() => thumbsEl.classList.toggle('multi', thumbCols() > 1)).observe(thumbsEl);
+
+// サイドバーの幅変更（境界をドラッグ）
+const SIDEBAR_DEFAULT = 250;
+function setSidebarWidth(w) {
+  w = Math.round(Math.max(180, Math.min(window.innerWidth * 0.7, w)));
+  $('sidebar').style.width = w + 'px';
+  return w;
+}
+$('resizer').addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  const rz = $('resizer');
+  rz.setPointerCapture(e.pointerId);
+  rz.classList.add('drag'); document.body.classList.add('resizing');
+  const startX = e.clientX, startW = $('sidebar').offsetWidth;
+  const move = (ev) => setSidebarWidth(startW + ev.clientX - startX);
+  const up = () => {
+    rz.removeEventListener('pointermove', move); rz.removeEventListener('pointerup', up);
+    rz.classList.remove('drag'); document.body.classList.remove('resizing');
+    store('pdfv:sidebarW', $('sidebar').offsetWidth);
+  };
+  rz.addEventListener('pointermove', move); rz.addEventListener('pointerup', up);
+});
+$('resizer').addEventListener('dblclick', () => store('pdfv:sidebarW', setSidebarWidth(SIDEBAR_DEFAULT)));
+setSidebarWidth(load('pdfv:sidebarW', SIDEBAR_DEFAULT));
+
+// ---------------- ページ操作 ----------------
+function targetPages() {
+  if (S.selected.size) return S.pages.filter((p) => S.selected.has(p.id));
+  return hasDoc() ? [S.pages[S.current]] : [];
+}
+function rotatePages(delta) {
+  const ids = new Set(targetPages().map((p) => p.id));
+  if (!ids.size) return;
+  commit(() => { S.pages.forEach((p) => { if (ids.has(p.id)) p.rot = (p.rot + delta + 360) % 360; }); });
+}
+$('btnRotL').onclick = () => rotatePages(-90);
+$('btnRotR').onclick = () => rotatePages(90);
+
+function deletePages(ids, ask = true) {
+  if (!ids.size) return;
+  if (ids.size >= S.pages.length) { toast('すべてのページを削除することはできません'); return; }
+  if (ask && !confirm(`${ids.size}ページを削除しますか？（保存するまでファイルは変わりません）`)) return;
+  commit(() => {
+    const old = S.pages;
+    S.pages = old.filter((p) => !ids.has(p.id));
+    // 削除したページを指すしおりは、次に残っているページへ付け替える
+    const remap = new Map();
+    old.forEach((p, i) => {
+      if (!ids.has(p.id)) return;
+      let j = i + 1; while (j < old.length && ids.has(old[j].id)) j++;
+      if (j >= old.length) { j = i - 1; while (j >= 0 && ids.has(old[j].id)) j--; }
+      remap.set(p.id, old[j].id);
+    });
+    walkBm(S.bookmarks, (b) => { if (remap.has(b.pageId)) b.pageId = remap.get(b.pageId); });
+    S.selected.clear();
+    S.current = Math.min(S.current, S.pages.length - 1);
+  });
+}
+$('btnDelete').onclick = () => deletePages(new Set(targetPages().map((p) => p.id)));
+
+// ---------------- 保存 ----------------
+async function getLib(src) {
+  if (!src.lib) src.lib = await PDFDocument.load(src.bytes, { ignoreEncryption: true, updateMetadata: false });
+  return src.lib;
+}
+
+async function buildPdf(pageList, bookmarks) {
+  if (pageList.some((p) => S.sources[p.src].encrypted)) throw new Error('パスワード付きPDFを含むため保存できません');
+  const out = await PDFDocument.create();
+  const bySrc = new Map();
+  pageList.forEach((p) => { if (!bySrc.has(p.src)) bySrc.set(p.src, []); bySrc.get(p.src).push(p.idx); });
+  const copied = new Map();
+  for (const [si, idxs] of bySrc) {
+    const lib = await getLib(S.sources[si]);
+    const cp = await out.copyPages(lib, idxs);
+    idxs.forEach((ix, k) => copied.set(si + ':' + ix, cp[k]));
+  }
+  const refMap = new Map();
+  for (const p of pageList) {
+    const pg = copied.get(p.src + ':' + p.idx);
+    const rot = (S.sources[p.src].sizes[p.idx].rotate + p.rot) % 360;
+    pg.setRotation(degrees(rot));
+    out.addPage(pg);
+    const mb = pg.getMediaBox();
+    refMap.set(p.id, { ref: pg.ref, top: rot === 0 ? mb.y + mb.height : null });
+  }
+  writeOutline(out, bookmarks, refMap);
+  return out.save();
+}
+
+// しおり（アウトライン）をPDFに書き込む
+function writeOutline(doc, items, refMap) {
+  if (!items.length) return;
+  const ctx = doc.context;
+  const rootRef = ctx.nextRef();
+  function build(list, parentRef) {
+    const refs = list.map(() => ctx.nextRef());
+    let visible = 0;
+    list.forEach((it, i) => {
+      const o = { Title: PDFHexString.fromText(it.title), Parent: parentRef };
+      const dest = it.pageId != null && refMap.get(it.pageId);
+      if (dest) o.Dest = [dest.ref, 'XYZ', null, dest.top, null];
+      if (i > 0) o.Prev = refs[i - 1];
+      if (i < list.length - 1) o.Next = refs[i + 1];
+      let sub = 0;
+      if (it.children.length) {
+        const c = build(it.children, refs[i]);
+        o.First = c.first; o.Last = c.last; o.Count = it.open ? c.count : -c.count;
+        if (it.open) sub = c.count;
+      }
+      ctx.assign(refs[i], ctx.obj(o));
+      visible += 1 + sub;
+    });
+    return { first: refs[0], last: refs[refs.length - 1], count: visible };
+  }
+  const c = build(items, rootRef);
+  ctx.assign(rootRef, ctx.obj({ Type: 'Outlines', First: c.first, Last: c.last, Count: c.count }));
+  doc.catalog.set(PDFName.of('Outlines'), rootRef);
+  doc.catalog.set(PDFName.of('PageMode'), PDFName.of('UseOutlines'));
+}
+
+const PDF_TYPES = [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }];
+async function writeFile(bytes, name, handle) {
+  if (!handle && window.showSaveFilePicker) {
+    try { handle = await showSaveFilePicker({ suggestedName: name, types: PDF_TYPES }); }
+    catch (e) { if (e.name === 'AbortError') return null; handle = null; }
+  }
+  if (handle) {
+    const w = await handle.createWritable();
+    await w.write(bytes); await w.close();
+    return handle;
+  }
+  downloadBytes(bytes, name);
+  return 'download';
+}
+function downloadBytes(bytes, name) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+  const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+async function saveDoc(asNew) {
+  if (!hasDoc()) return;
+  try {
+    busy(true, '保存中…');
+    const bytes = await buildPdf(S.pages, S.bookmarks);
+    busy(false);
+    const h = await writeFile(bytes, S.fileName, asNew ? null : S.fileHandle);
+    if (!h) return;
+    if (h !== 'download') {
+      S.fileHandle = h; S.fileName = h.name;
+      S.fileKey = 'pdfv:' + h.name + ':' + bytes.length;
+      saveViewState();
+    }
+    S.dirty = false; updateUI();
+    toast(h === 'download' ? 'ダウンロードフォルダに保存しました' : `「${S.fileName}」に保存しました`);
+  } catch (e) { console.error(e); toast('保存できませんでした: ' + e.message, 5000); }
+  finally { busy(false); }
+}
+$('btnSave').onclick = () => saveDoc(false);
+$('btnSaveAs').onclick = () => saveDoc(true);
+window.addEventListener('beforeunload', (e) => { if (S.dirty) { e.preventDefault(); e.returnValue = ''; } });
+
+// ---------------- 抽出 ----------------
+function formatRange(idxs) {
+  idxs = [...idxs].sort((a, b) => a - b);
+  const out = [];
+  for (let i = 0; i < idxs.length; i++) {
+    let j = i; while (j + 1 < idxs.length && idxs[j + 1] === idxs[j] + 1) j++;
+    out.push(i === j ? `${idxs[i] + 1}` : `${idxs[i] + 1}-${idxs[j] + 1}`);
+    i = j;
+  }
+  return out.join(', ');
+}
+function parseRange(str, n) {
+  const set = new Set();
+  for (const part of str.replace(/[，、]/g, ',').replace(/[－ー〜～]/g, '-').normalize('NFKC').split(',')) {
+    const s = part.trim(); if (!s) continue;
+    const m = s.match(/^(\d*)\s*-\s*(\d*)$/);
+    if (m) {
+      const a = m[1] ? +m[1] : 1, b = m[2] ? +m[2] : n;
+      if (a < 1 || b > n || a > b) throw new Error(`範囲「${s}」が正しくありません（1〜${n}）`);
+      for (let k = a; k <= b; k++) set.add(k - 1);
+    } else if (/^\d+$/.test(s)) {
+      const k = +s; if (k < 1 || k > n) throw new Error(`ページ「${s}」はありません（1〜${n}）`);
+      set.add(k - 1);
+    } else throw new Error(`「${s}」を読み取れません`);
+  }
+  if (!set.size) throw new Error('ページを指定してください');
+  return [...set].sort((a, b) => a - b);
+}
+$('btnExtract').onclick = () => {
+  const sel = S.selected.size ? S.pages.map((p, i) => S.selected.has(p.id) ? i : -1).filter((i) => i >= 0) : [S.current];
+  $('exRange').value = formatRange(sel);
+  $('exDel').checked = false;
+  $('dlgExtract').showModal();
+  $('exRange').select();
+};
+function pruneBookmarks(list, keep) {
+  const out = [];
+  for (const b of list) {
+    const children = pruneBookmarks(b.children, keep);
+    if (keep.has(b.pageId) || children.length) out.push({ ...b, pageId: keep.has(b.pageId) ? b.pageId : null, children });
+  }
+  return out;
+}
+$('exOk').onclick = async () => {
+  let idxs;
+  try { idxs = parseRange($('exRange').value, S.pages.length); } catch (e) { toast(e.message); return; }
+  const mode = document.querySelector('input[name=exMode]:checked').value;
+  const withBm = $('exBm').checked, del = $('exDel').checked;
+  const list = idxs.map((i) => S.pages[i]);
+  const base = baseName(S.fileName);
+  $('dlgExtract').close();
+  try {
+    if (mode === 'one') {
+      busy(true, '抽出中…');
+      const keep = new Set(list.map((p) => p.id));
+      const bytes = await buildPdf(list, withBm ? pruneBookmarks(S.bookmarks, keep) : []);
+      busy(false);
+      const h = await writeFile(bytes, `${base}_p${formatRange(idxs).replace(/\s/g, '').replace(/,/g, '_')}.pdf`, null);
+      if (!h) return;
+      toast(`${list.length}ページを抽出して保存しました`);
+    } else {
+      let dir = null;
+      if (window.showDirectoryPicker) {
+        try { dir = await showDirectoryPicker({ mode: 'readwrite' }); } catch (e) { if (e.name === 'AbortError') return; }
+      }
+      busy(true, '抽出中…');
+      const digits = String(S.pages.length).length;
+      for (let k = 0; k < list.length; k++) {
+        busy(true, `抽出中… (${k + 1}/${list.length})`);
+        const p = list[k];
+        const bytes = await buildPdf([p], withBm ? pruneBookmarks(S.bookmarks, new Set([p.id])) : []);
+        const name = `${base}_p${String(idxs[k] + 1).padStart(digits, '0')}.pdf`;
+        if (dir) {
+          const fh = await dir.getFileHandle(name, { create: true });
+          const w = await fh.createWritable(); await w.write(bytes); await w.close();
+        } else downloadBytes(bytes, name);
+      }
+      toast(`${list.length}個のPDFを保存しました`);
+    }
+    if (del) deletePages(new Set(list.map((p) => p.id)), false);
+  } catch (e) { console.error(e); toast('抽出できませんでした: ' + e.message, 5000); }
+  finally { busy(false); }
+};
+
+// ---------------- 印刷 ----------------
+function openPrintDialog() {
+  if (!hasDoc()) return;
+  $('prSelOpt').disabled = !S.selected.size;
+  if (S.selected.size) document.querySelector('input[name=prMode][value=sel]').checked = true;
+  else if (document.querySelector('input[name=prMode]:checked').value === 'sel') document.querySelector('input[name=prMode][value=all]').checked = true;
+  $('dlgPrint').showModal();
+}
+$('prRange').addEventListener('focus', () => { document.querySelector('input[name=prMode][value=range]').checked = true; });
+$('btnPrint').onclick = openPrintDialog;
+$('prOk').onclick = async () => {
+  const mode = document.querySelector('input[name=prMode]:checked').value;
+  let list;
+  try {
+    if (mode === 'all') list = S.pages;
+    else if (mode === 'cur') list = [S.pages[S.current]];
+    else if (mode === 'sel') list = S.pages.filter((p) => S.selected.has(p.id));
+    else list = parseRange($('prRange').value, S.pages.length).map((i) => S.pages[i]);
+  } catch (e) { toast(e.message); return; }
+  $('dlgPrint').close();
+  await printPages(list, +$('prDpi').value);
+};
+
+function clearPrintArea() {
+  const area = $('printArea');
+  area.querySelectorAll('img').forEach((img) => URL.revokeObjectURL(img.src));
+  area.innerHTML = '';
+}
+async function printPages(list, dpi) {
+  clearPrintArea();
+  const area = $('printArea');
+  try {
+    for (let k = 0; k < list.length; k++) {
+      busy(true, `印刷の準備中… ${k + 1}/${list.length}ページ`);
+      const p = list[k];
+      const page = await S.sources[p.src].pdfjs.getPage(p.idx + 1);
+      let vp = page.getViewport({ scale: dpi / 72, rotation: (page.rotate + p.rot) % 360 });
+      const maxPx = 36e6; // A1図面などを高画質で印刷する時のメモリ不足を防ぐ
+      if (vp.width * vp.height > maxPx) vp = page.getViewport({ scale: dpi / 72 * Math.sqrt(maxPx / (vp.width * vp.height)), rotation: (page.rotate + p.rot) % 360 });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(vp.width); canvas.height = Math.floor(vp.height);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport: vp, intent: 'print' }).promise;
+      const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.92));
+      canvas.width = canvas.height = 0;
+      const box = document.createElement('div');
+      box.className = 'pp ' + (vp.width > vp.height ? 'land' : 'port');
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(blob);
+      box.appendChild(img); area.appendChild(box);
+      await img.decode();
+    }
+  } catch (e) {
+    console.error(e); clearPrintArea(); toast('印刷の準備に失敗しました: ' + e.message, 5000); return;
+  } finally { busy(false); }
+  window.print();
+}
+window.addEventListener('afterprint', clearPrintArea);
+
+// ---------------- 結合 ----------------
+let mergeFiles = [];
+function openMergeDialog(files = []) {
+  mergeFiles = [...files];
+  $('mergePos').disabled = !hasDoc();
+  renderMergeList();
+  $('dlgMerge').showModal();
+}
+function renderMergeList() {
+  const box = $('mergeList'); box.innerHTML = '';
+  const pos = $('mergePos').value;
+  const cur = hasDoc() ? `<div class="fi fixed"><span class="nm">📄 現在の文書：${escapeHtml(S.fileName)}（${S.pages.length}ページ）</span></div>` : '';
+  const items = mergeFiles.map((f, i) => `<div class="fi"><span class="nm">${i + 1}. ${escapeHtml(f.name)}</span>
+    <button data-a="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button><button data-a="down" data-i="${i}" ${i === mergeFiles.length - 1 ? 'disabled' : ''}>↓</button><button data-a="rm" data-i="${i}">✕</button></div>`).join('');
+  box.innerHTML = pos === 'start' ? items + cur : cur + items;
+  if (!mergeFiles.length) box.insertAdjacentHTML('beforeend', '<div class="hint">「ファイルを追加」かドラッグ＆ドロップでPDFを追加してください。</div>');
+  $('mergeOk').disabled = !mergeFiles.length;
+}
+function escapeHtml(s) { return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+$('mergePos').onchange = renderMergeList;
+$('mergeList').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  const i = +b.dataset.i;
+  if (b.dataset.a === 'rm') mergeFiles.splice(i, 1);
+  else { const j = b.dataset.a === 'up' ? i - 1 : i + 1; [mergeFiles[i], mergeFiles[j]] = [mergeFiles[j], mergeFiles[i]]; }
+  renderMergeList();
+});
+$('mergeList').addEventListener('dragover', (e) => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); });
+$('mergeList').addEventListener('drop', (e) => {
+  e.preventDefault(); e.stopPropagation();
+  mergeFiles.push(...pdfFiles(e.dataTransfer.files)); renderMergeList();
+});
+$('mergeAdd').onclick = () => $('fileMerge').click();
+$('fileMerge').addEventListener('change', (e) => { mergeFiles.push(...e.target.files); e.target.value = ''; renderMergeList(); });
+$('btnMerge').onclick = () => openMergeDialog();
+$('mergeOk').onclick = async () => {
+  const files = mergeFiles; const pos = $('mergePos').value; const fileBm = $('mergeBm').checked;
+  $('dlgMerge').close();
+  if (!hasDoc()) { // 文書を開いていなければ、選んだファイルを結合して新規に開く
+    if (files.length === 1) openDocument(files); else openDocument(files);
+    return;
+  }
+  busy(true, '結合中…');
+  try {
+    const loaded = [];
+    for (const f of files) loaded.push({ f, ...(await loadSource(await readFile(f), f.name)) });
+    commit(() => {
+      const newPages = loaded.flatMap((l) => l.pages);
+      let newBms = loaded.flatMap((l) => fileBm ? [{ id: uid(), title: baseName(l.f.name), pageId: l.pages[0]?.id ?? null, open: true, children: l.bookmarks }] : l.bookmarks);
+      if (fileBm && !S.bookmarks.some((b) => b._fileBm)) {
+        // 現在の文書もファイル名のしおりでまとめる
+        S.bookmarks = [{ id: uid(), title: baseName(S.fileName), pageId: S.pages[0].id, open: true, children: S.bookmarks, _fileBm: true }];
+      }
+      newBms.forEach((b) => { if (fileBm) b._fileBm = true; });
+      const at = pos === 'start' ? 0 : pos === 'after' ? S.current + 1 : S.pages.length;
+      S.pages.splice(at, 0, ...newPages);
+      if (pos === 'start') S.bookmarks.unshift(...newBms); else S.bookmarks.push(...newBms);
+      S.current = at;
+    });
+    toast(`${files.length}個のファイルを結合しました。保存するとファイルに反映されます`, 4000);
+    requestAnimationFrame(() => goTo(S.current));
+  } catch (e) { console.error(e); toast('結合できませんでした: ' + e.message, 5000); }
+  finally { busy(false); }
+};
+
+// ---------------- しおり ----------------
+function walkBm(list, fn, parent = null) { list.forEach((b, i) => { fn(b, list, i, parent); walkBm(b.children, fn, b); }); }
+function findBm(id) { let r = null; walkBm(S.bookmarks, (b, list, i, parent) => { if (b.id === id) r = { b, list, i, parent }; }); return r; }
+function findParentList(parent) { return parent ? findBm(parent.id) : null; }
+
+function renderBookmarks() {
+  const tree = $('bmTree');
+  if (!S.bookmarks.length) {
+    tree.innerHTML = `<div class="hint">${hasDoc() ? 'しおりはありません。<br>見たいページを表示して「＋ 追加」（Ctrl+B）で作成できます。本文の見出しを選択してから追加すると、その文字がしおり名になります。' : 'PDFを開くとしおりが表示されます。'}</div>`;
+    return;
+  }
+  const ul = (list) => '<ul>' + list.map((b) => {
+    const pi = pageIndexById(b.pageId);
+    return `<li><div class="bm-row${b.id === S.selBm ? ' sel' : ''}${pi < 0 ? ' bm-nodest' : ''}" data-id="${b.id}">
+      <span class="bm-tog">${b.children.length ? (b.open ? '▾' : '▸') : ''}</span>
+      <span class="bm-title">${escapeHtml(b.title)}</span><span class="bm-page">${pi >= 0 ? pi + 1 : ''}</span></div>
+      ${b.children.length && b.open ? ul(b.children) : ''}</li>`;
+  }).join('') + '</ul>';
+  tree.innerHTML = ul(S.bookmarks);
+}
+$('bmTree').addEventListener('click', (e) => {
+  const row = e.target.closest('.bm-row'); if (!row || e.target.tagName === 'INPUT') return;
+  const f = findBm(+row.dataset.id); if (!f) return;
+  if (e.target.classList.contains('bm-tog') && f.b.children.length) { f.b.open = !f.b.open; renderBookmarks(); return; }
+  S.selBm = f.b.id; renderBookmarks();
+  const pi = pageIndexById(f.b.pageId);
+  if (pi >= 0) goTo(pi);
+});
+$('bmTree').addEventListener('dblclick', (e) => {
+  const row = e.target.closest('.bm-row'); if (!row || e.target.classList.contains('bm-tog')) return;
+  S.selBm = +row.dataset.id; renameBm();
+});
+
+function renameBm(isNew = false) {
+  const f = findBm(S.selBm); if (!f) return;
+  renderBookmarks();
+  const row = $('bmTree').querySelector(`.bm-row[data-id="${f.b.id}"]`);
+  const span = row.querySelector('.bm-title');
+  const inp = document.createElement('input'); inp.type = 'text'; inp.value = f.b.title;
+  span.replaceWith(inp); inp.focus(); inp.select();
+  let done = false;
+  const finish = (ok) => {
+    if (done) return; done = true;
+    const v = inp.value.trim();
+    if (ok && v && v !== f.b.title) { if (isNew) { f.b.title = v; renderBookmarks(); } else commit(() => { findBm(f.b.id).b.title = v; }, { relayout: false }); }
+    else renderBookmarks();
+    viewer.focus();
+  };
+  inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') finish(true); if (e.key === 'Escape') finish(false); });
+  inp.addEventListener('blur', () => finish(true));
+}
+
+function addBookmark() {
+  if (!hasDoc()) return;
+  switchTab('bm');
+  const selText = (window.getSelection()?.toString() || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const node = { id: uid(), title: selText || `ページ ${S.current + 1}`, pageId: S.pages[S.current].id, open: true, children: [] };
+  commit(() => {
+    const f = S.selBm && findBm(S.selBm);
+    if (f) f.list.splice(f.i + 1, 0, node);
+    else {
+      // 選択がなければページ順になる位置に挿入
+      const i = S.bookmarks.findIndex((b) => pageIndexById(b.pageId) > S.current);
+      i < 0 ? S.bookmarks.push(node) : S.bookmarks.splice(i, 0, node);
+    }
+    S.selBm = node.id;
+  }, { relayout: false });
+  window.getSelection()?.removeAllRanges();
+  renameBm(true);
+}
+function bmOp(fn) {
+  const f = S.selBm && findBm(S.selBm);
+  if (!f) { toast('しおりを選択してください'); return; }
+  commit(() => fn(findBm(S.selBm)), { relayout: false });
+}
+$('bmAdd').onclick = addBookmark;
+$('bmRename').onclick = () => S.selBm ? renameBm() : toast('しおりを選択してください');
+$('bmSetDest').onclick = () => bmOp((f) => { f.b.pageId = S.pages[S.current].id; });
+$('bmDel').onclick = () => {
+  const f = S.selBm && findBm(S.selBm); if (!f) return toast('しおりを選択してください');
+  if (f.b.children.length && !confirm(`「${f.b.title}」と、その下の${countBm(f.b.children)}個のしおりを削除しますか？`)) return;
+  bmOp((f) => { f.list.splice(f.i, 1); S.selBm = (f.list[f.i] || f.list[f.i - 1] || f.parent || {}).id ?? null; });
+};
+function countBm(list) { let n = 0; walkBm(list, () => n++); return n; }
+$('bmUp').onclick = () => bmOp((f) => { if (f.i === 0) return false; [f.list[f.i - 1], f.list[f.i]] = [f.list[f.i], f.list[f.i - 1]]; });
+$('bmDown').onclick = () => bmOp((f) => { if (f.i === f.list.length - 1) return false; [f.list[f.i + 1], f.list[f.i]] = [f.list[f.i], f.list[f.i + 1]]; });
+$('bmIn').onclick = () => bmOp((f) => {
+  if (f.i === 0) { toast('前にしおりがないため階層を下げられません'); return false; }
+  const prev = f.list[f.i - 1];
+  f.list.splice(f.i, 1); prev.children.push(f.b); prev.open = true;
+});
+$('bmOut').onclick = () => bmOp((f) => {
+  if (!f.parent) return false;
+  const pf = findParentList(f.parent);
+  f.list.splice(f.i, 1); pf.list.splice(pf.i + 1, 0, f.b);
+});
+$('bmExpand').onclick = () => {
+  let anyClosed = false; walkBm(S.bookmarks, (b) => { if (b.children.length && !b.open) anyClosed = true; });
+  walkBm(S.bookmarks, (b) => { b.open = anyClosed; }); renderBookmarks();
+};
+
+// ---------------- しおりの自動作成（報告書） ----------------
+// 目次の項目を本文の見出し・巻末の扉ページと照合してページを決める。目次がなければ見出しの書体から推定する。
+const compact = (s) => s.normalize('NFKC').replace(/\s+/g, '');
+const sortChars = (s) => [...s].sort().join('');
+const stripNo = (s) => s.replace(/^\d+\./, '');
+const sameChars = (a, b) => a.length > 0 && sortChars(a) === sortChars(b); // 扉ページは文字の格納順が不定なため並びを無視して比較
+const LEADER = /^(\d+(?:\.\d+)*\.?)\s*(.*?)\s*[-‐－―─ー…･・.]{3,}\s*(\d+)$/;
+
+async function readPageLayout(p) {
+  const page = await S.sources[p.src].pdfjs.getPage(p.idx + 1);
+  const tc = await page.getTextContent();
+  const items = tc.items.filter((it) => it.str && it.str.trim()).map((it) => ({
+    s: it.str, x: it.transform[4], y: it.transform[5], w: it.width,
+    size: Math.hypot(it.transform[0], it.transform[1]) || it.height || 10, font: it.fontName,
+  }));
+  const chars = {}; // 文字数が最も多い書体を本文の書体とみなす
+  items.forEach((it) => { chars[it.font] = (chars[it.font] || 0) + it.s.length; });
+  const bodyFont = Object.keys(chars).sort((a, b) => chars[b] - chars[a])[0];
+  const text = compact(items.map((it) => it.s).join(''));
+  const sorted = [...items].sort((a, b) => b.y - a.y || a.x - b.x);
+  const rows = [];
+  for (const it of sorted) {
+    const r = rows[rows.length - 1];
+    if (r && Math.abs(r[0].y - it.y) <= 0.4 * Math.min(r[0].size, it.size)) r.push(it); else rows.push([it]);
+  }
+  const lines = [];
+  for (const r of rows) {
+    r.sort((a, b) => a.x - b.x);
+    let seg = null;
+    for (const it of r) { // 同じ高さでも大きく離れた文字は別の行として扱う
+      if (seg && it.x - seg.end <= 3 * it.size) { seg.text += it.s; seg.end = it.x + it.w; }
+      else { seg = { text: it.s, x: it.x, y: it.y, size: it.size, font: it.font, end: it.x + it.w }; lines.push(seg); }
+    }
+  }
+  return { lines, text, bodyFont };
+}
+
+function parseToc(layouts, tocStart) {
+  const toc = { front: [], body: [], back: [], end: tocStart };
+  let section = 'front';
+  for (let i = tocStart; i < Math.min(tocStart + 4, layouts.length); i++) {
+    let hits = 0;
+    for (const ln of layouts[i].lines) {
+      const raw = ln.text.trim();
+      const c = compact(raw);
+      if (/^[<＜【\[].*[>＞】\]]$/.test(c)) {
+        section = /巻頭/.test(c) ? 'front' : /巻末/.test(c) ? 'back' : 'skip';
+        hits++;
+        continue;
+      }
+      const m = raw.match(LEADER);
+      if (m) {
+        const num = m[1];
+        toc.body.push({ num, title: m[2].replace(/\s+/g, ' ').trim(), printed: +m[3], level: num.replace(/\.$/, '').split('.').length });
+        section = 'body';
+        hits++;
+      } else if ((section === 'front' || section === 'back') && /^(・|\d+\.)/.test(c)) {
+        const title = raw.replace(/^・\s*/, '').replace(/[（(]\s*S\s*=.*?[）)]/i, '').replace(/\s+/g, '');
+        toc[section].push(title);
+        hits++;
+      }
+    }
+    if (!hits) break;
+    toc.end = i;
+  }
+  return toc;
+}
+
+function coverTitle(layout) {
+  const lines = [...layout.lines].sort((a, b) => b.y - a.y);
+  const out = [];
+  for (const ln of lines) {
+    if (/報告書/.test(compact(ln.text))) return out.length ? out.join('') : null;
+    out.push(ln.text.replace(/\s+/g, ''));
+  }
+  return null;
+}
+
+async function isDividerPage(p, layout) {
+  const t = stripNo(layout.text);
+  if (t.length < 2 || t.length > 40 || /\d/.test(t) || !/[぀-鿿]/.test(t)) return false;
+  const page = await S.sources[p.src].pdfjs.getPage(p.idx + 1);
+  const ops = await page.getOperatorList();
+  const O = pdfjsLib.OPS;
+  return !ops.fnArray.some((f) => f === O.paintImageXObject || f === O.paintInlineImageXObject || f === O.paintImageMaskXObject || f === O.paintImageXObjectRepeat);
+}
+
+// 目次がない場合：本文より目立つ書体の番号付き行を、番号が連番になるものだけ見出しとして拾う
+function headingsFromFonts(layouts, from, to) {
+  const out = [];
+  let cur = [];
+  for (let i = from; i < to; i++) {
+    const L = layouts[i];
+    const bodySize = Math.max(...L.lines.filter((l) => l.font === L.bodyFont).map((l) => l.size), 0);
+    for (const ln of [...L.lines].sort((a, b) => b.y - a.y)) {
+      const raw = ln.text.trim();
+      const m = raw.match(/^(\d+(?:\.\d+)*)(\.?)\s*([^\d\s.].*)$/);
+      if (!m || raw.length > 40 || ln.font === L.bodyFont || ln.size < bodySize - 0.5) continue;
+      const nums = m[1].split('.').map(Number);
+      if (nums.length === 1 && !m[2]) continue; // 「6 三軸…」のような図番号を除く
+      const ok = nums.every((v, k) => k < nums.length - 1 ? v === cur[k] : v === (cur[k] || 0) + 1);
+      if (!ok) continue;
+      cur = nums;
+      out.push({ num: m[1] + m[2], title: m[3].replace(/\s+/g, ' '), level: nums.length, page: i });
+    }
+  }
+  return out;
+}
+
+async function detectBookmarks(useToc = true) {
+  const n = S.pages.length;
+  const layouts = [];
+  for (let i = 0; i < n; i++) {
+    if (i % 10 === 0) busy(true, `報告書を解析中… ${i}/${n}ページ`);
+    layouts.push(await readPageLayout(S.pages[i]));
+  }
+  if (layouts.reduce((a, l) => a + l.text.length, 0) < n * 5) throw new Error('文字情報がほとんどないPDF（スキャンなど）のため自動作成できません');
+
+  const rows = [], notes = [];
+  const add = (title, level, page, status = 'ok') => rows.push({ title, level, page, status });
+  const cover = coverTitle(layouts[0]);
+  if (cover) add(cover, 1, 0);
+
+  let tocStart = -1;
+  if (useToc) {
+    for (let i = 0; i < Math.min(15, n); i++) {
+      if (layouts[i].lines.filter((l) => LEADER.test(l.text.trim())).length >= 3) { tocStart = i; break; }
+    }
+  }
+  const toc = tocStart >= 0 ? parseToc(layouts, tocStart) : { front: [], body: [], back: [], end: -1 };
+  if (tocStart < 0) notes.push('目次が見つからないため、見出しの書体から推定しました。');
+  const isRoot = (i) => sameChars(layouts[i].text, '巻末資料');
+
+  // 巻頭資料は表紙と目次の間のページに順番どおり対応させる
+  toc.front.forEach((t, k) => {
+    const pg = k + 1;
+    if (pg < tocStart) add(t, 1, pg); else notes.push(`「${t}」のページが判別できませんでした。`);
+  });
+  if (tocStart >= 0) add('目 次', 1, tocStart);
+
+  // 本文の見出し
+  const bodyFrom = toc.end + 1;
+  let rootPage = -1;
+  for (let i = Math.max(bodyFrom, 1); i < n; i++) if (isRoot(i)) { rootPage = i; break; }
+  const bodyEnd = rootPage >= 0 ? rootPage : n;
+  let lastBody = bodyFrom - 1;
+  if (tocStart >= 0) {
+    const found = [];
+    let from = bodyFrom;
+    for (const e of toc.body) {
+      const key = compact(e.num + e.title);
+      const match = (test) => {
+        for (let i = from; i < bodyEnd; i++) if (layouts[i].lines.some((l) => test(compact(l.text)))) return i;
+        return -1;
+      };
+      let pg = match((c) => c === key);
+      if (pg < 0) pg = match((c) => c.startsWith(key));
+      if (pg >= 0) from = pg;
+      found.push(pg);
+    }
+    const diffs = found.map((pg, k) => pg >= 0 ? pg - (toc.body[k].printed - 1) : null).filter((d) => d != null).sort((a, b) => a - b);
+    const offset = diffs.length ? diffs[diffs.length >> 1] : null;
+    toc.body.forEach((e, k) => {
+      const label = `${e.num} ${e.title}`;
+      let pg = found[k], status = 'ok';
+      if (pg < 0) {
+        if (offset == null) { notes.push(`「${label}」のページが見つかりませんでした。`); return; }
+        pg = Math.min(n - 1, e.printed - 1 + offset);
+        status = 'est';
+        notes.push(`「${label}」は本文に同じ見出しがなく、目次のページ番号から ${pg + 1} ページと推定しました。`);
+      } else if (offset != null && pg !== e.printed - 1 + offset) {
+        status = 'warn';
+        notes.push(`「${label}」は ${pg + 1} ページで見つかりましたが、目次の記載（${e.printed}）から計算すると ${e.printed + offset} ページです。`);
+      }
+      add(label, e.level, pg, status);
+      lastBody = Math.max(lastBody, pg);
+    });
+  } else {
+    for (const h of headingsFromFonts(layouts, 1, bodyEnd)) {
+      add(`${h.num} ${h.title}`, h.level, h.page);
+      lastBody = Math.max(lastBody, h.page);
+    }
+  }
+
+  // 巻末資料
+  const backFrom = rootPage >= 0 ? rootPage + 1 : lastBody + 1;
+  const children = [];
+  for (const t of toc.back) {
+    const key = stripNo(compact(t));
+    let pg = -1;
+    for (let i = backFrom; i < n; i++) if (sameChars(stripNo(layouts[i].text), key)) { pg = i; break; }
+    if (pg >= 0) children.push({ title: t, page: pg });
+    else notes.push(`巻末資料「${t}」の扉ページが見つかりませんでした。`);
+  }
+  if (!toc.back.length && rootPage >= 0) {
+    for (let i = backFrom; i < n; i++) {
+      if (await isDividerPage(S.pages[i], layouts[i])) children.push({ title: layouts[i].text, page: i });
+    }
+  }
+  if (children.some((c, k) => k > 0 && c.page < children[k - 1].page)) notes.push('巻末資料の並びが目次と実際のページで異なるため、実際のページ順にしました。');
+  children.sort((a, b) => a.page - b.page);
+  if (rootPage >= 0) add('巻末資料', 1, rootPage);
+  children.forEach((c) => add(c.title, rootPage >= 0 ? 2 : 1, c.page));
+  return { rows, notes };
+}
+
+function rowsToTree(rows) {
+  const root = [], stack = [];
+  for (const r of rows) {
+    const node = { id: uid(), title: r.title, pageId: S.pages[r.page].id, open: true, children: [] };
+    while (stack.length && stack[stack.length - 1].level >= r.level) stack.pop();
+    (stack.length ? stack[stack.length - 1].node.children : root).push(node);
+    stack.push({ level: r.level, node });
+  }
+  return root;
+}
+
+let autoResult = null;
+async function autoBookmarks() {
+  if (!hasDoc()) { toast('PDFを開いてください'); return; }
+  try {
+    autoResult = await detectBookmarks();
+  } catch (e) { console.error(e); toast(e.message, 5000); return; }
+  finally { busy(false); }
+  const { rows, notes } = autoResult;
+  if (rows.length < 2) { toast('見出しを見つけられませんでした'); return; }
+  const old = countBm(S.bookmarks);
+  $('autoSummary').textContent = `${rows.length}個のしおりを検出しました。` + (old ? `今ある${old}個のしおりと置き換えます。` : '');
+  $('autoNotes').innerHTML = notes.map((t) => `<li>${escapeHtml(t)}</li>`).join('');
+  $('autoNotes').style.display = notes.length ? '' : 'none';
+  $('autoList').innerHTML = rows.map((r) => `<div class="auto-row ${r.status}"><span class="t" style="padding-left:${(r.level - 1) * 16}px">${escapeHtml(r.title)}</span><span class="p">${r.page + 1}${r.status === 'est' ? '（推定）' : r.status === 'warn' ? '（要確認）' : ''}</span></div>`).join('');
+  $('dlgAuto').showModal();
+}
+$('bmAuto').onclick = autoBookmarks;
+$('autoOk').onclick = () => {
+  $('dlgAuto').close();
+  commit(() => { S.bookmarks = rowsToTree(autoResult.rows); S.selBm = null; }, { relayout: false });
+  switchTab('bm');
+  toast(`${autoResult.rows.length}個のしおりを作成しました。保存するとファイルに反映されます`, 4000);
+};
+
+// ---------------- 検索 ----------------
+const norm =(s) => s.normalize('NFKC').toLowerCase();
+async function pageText(p) {
+  const key = p.src + ':' + p.idx;
+  if (!textCache.has(key)) {
+    const page = await S.sources[p.src].pdfjs.getPage(p.idx + 1);
+    const tc = await page.getTextContent();
+    textCache.set(key, tc.items.map((it) => norm(it.str || '')).join(''));
+  }
+  return textCache.get(key);
+}
+async function runSearch(q) {
+  const token = ++S.search.token;
+  S.search = { q, results: [], cur: -1, token };
+  $('searchResults').innerHTML = '';
+  if (!q || !hasDoc()) { $('searchInfo').textContent = 'ツールバーの検索欄に入力してEnterを押してください。'; rehighlight(); return; }
+  switchTab('search');
+  const nq = norm(q);
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < S.pages.length; i++) {
+    if (token !== S.search.token) return;
+    if (i % 20 === 0) $('searchInfo').textContent = `検索中… ${i}/${S.pages.length}ページ`;
+    const text = await pageText(S.pages[i]);
+    let pos = text.indexOf(nq), n = 0;
+    const first = pos;
+    while (pos >= 0) { n++; pos = text.indexOf(nq, pos + nq.length); }
+    if (n) {
+      S.search.results.push({ pageId: S.pages[i].id });
+      const a = Math.max(0, first - 20);
+      const d = document.createElement('div'); d.className = 'sr'; d.dataset.k = S.search.results.length - 1;
+      d.innerHTML = `<b>${i + 1}ページ</b>（${n}件）<br>${a > 0 ? '…' : ''}${escapeHtml(text.slice(a, first))}<mark>${escapeHtml(text.slice(first, first + nq.length))}</mark>${escapeHtml(text.slice(first + nq.length, first + nq.length + 30))}…`;
+      frag.appendChild(d);
+    }
+  }
+  $('searchResults').appendChild(frag);
+  const r = S.search.results.length;
+  $('searchInfo').textContent = r ? `「${q}」が${r}ページで見つかりました` : `「${q}」は見つかりませんでした（文字情報のないスキャンPDFは検索できません）`;
+  rehighlight();
+  if (r) { const k = S.search.results.findIndex((x) => pageIndexById(x.pageId) >= S.current); gotoResult(k < 0 ? 0 : k); }
+}
+function gotoResult(k) {
+  const res = S.search.results; if (!res.length) return;
+  S.search.cur = (k + res.length) % res.length;
+  const i = pageIndexById(res[S.search.cur].pageId);
+  document.querySelectorAll('#searchResults .sr').forEach((d) => d.classList.toggle('cur', +d.dataset.k === S.search.cur));
+  const d = document.querySelector(`#searchResults .sr[data-k="${S.search.cur}"]`); if (d) d.scrollIntoView({ block: 'nearest' });
+  goTo(i);
+  requestAnimationFrame(() => {
+    const hl = pageEls[i] && pageEls[i].querySelector('.textLayer span.hl');
+    if (hl) hl.scrollIntoView({ block: 'center' });
+  });
+}
+function searchStep(dir) {
+  const q = $('searchBox').value.trim();
+  if (q !== S.search.q) { runSearch(q); return; }
+  if (!S.search.results.length) return;
+  // 現在ページから見て次／前の結果
+  const idxs = S.search.results.map((r) => pageIndexById(r.pageId));
+  let k;
+  if (dir > 0) { k = idxs.findIndex((i) => i > S.current); if (k < 0) k = 0; }
+  else { k = -1; idxs.forEach((i, j) => { if (i < S.current) k = j; }); if (k < 0) k = idxs.length - 1; }
+  if (idxs[S.search.cur] !== S.current) { const here = idxs.indexOf(S.current); if (here >= 0 && dir > 0 && S.search.cur < 0) k = here; }
+  gotoResult(k);
+}
+function clearSearch() { S.search = { q: '', results: [], cur: -1, token: S.search.token + 1 }; $('searchResults').innerHTML = ''; }
+$('searchResults').addEventListener('click', (e) => { const d = e.target.closest('.sr'); if (d) gotoResult(+d.dataset.k); });
+$('searchBox').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); searchStep(e.shiftKey ? -1 : 1); }
+  if (e.key === 'Escape') { $('searchBox').value = ''; runSearch(''); viewer.focus(); }
+});
+$('searchBox').addEventListener('search', () => { if (!$('searchBox').value) runSearch(''); });
+$('btnSearchNext').onclick = () => searchStep(1);
+$('btnSearchPrev').onclick = () => searchStep(-1);
+
+function highlightPage(el) {
+  const divs = el._textDivs; if (!divs) return;
+  divs.forEach((d) => d.classList.remove('hl', 'hl-cur'));
+  const q = S.search.q; if (!q) return;
+  const nq = norm(q);
+  const parts = divs.map((d) => norm(d.textContent));
+  const starts = []; let acc = '';
+  parts.forEach((t) => { starts.push(acc.length); acc += t; });
+  let pos = acc.indexOf(nq);
+  while (pos >= 0) {
+    const end = pos + nq.length;
+    for (let k = 0; k < parts.length; k++) {
+      const s = starts[k], e = s + parts[k].length;
+      if (e > pos && s < end) divs[k].classList.add('hl');
+    }
+    pos = acc.indexOf(nq, end);
+  }
+}
+function rehighlight() { pageEls.forEach((el) => el && highlightPage(el)); }
+
+// ---------------- ドラッグ＆ドロップ ----------------
+const pdfFiles = (fl) => [...fl].filter((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
+let dragDepth = 0;
+const isFileDrag = (e) => e.dataTransfer && e.dataTransfer.types.includes('Files');
+window.addEventListener('dragenter', (e) => {
+  if (!isFileDrag(e) || $('dlgMerge').open) return;
+  dragDepth++;
+  $('drop').classList.toggle('single', !hasDoc());
+  $('drop').classList.add('show');
+});
+window.addEventListener('dragleave', (e) => { if (!isFileDrag(e)) return; dragDepth--; if (dragDepth <= 0) { dragDepth = 0; $('drop').classList.remove('show'); } });
+window.addEventListener('dragover', (e) => { if (isFileDrag(e)) e.preventDefault(); });
+['dropOpen', 'dropMerge'].forEach((id) => {
+  const z = $(id);
+  z.addEventListener('dragover', () => z.classList.add('over'));
+  z.addEventListener('dragleave', () => z.classList.remove('over'));
+});
+window.addEventListener('drop', async (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragDepth = 0; $('drop').classList.remove('show');
+  const zone = e.target.closest && e.target.closest('#dropMerge, #dropOpen');
+  document.querySelectorAll('#drop .over').forEach((z) => z.classList.remove('over'));
+  const items = [...e.dataTransfer.items];
+  const files = pdfFiles(e.dataTransfer.files);
+  if (!files.length) { toast('PDFファイルをドロップしてください'); return; }
+  if (zone && zone.id === 'dropMerge' && hasDoc()) { openMergeDialog(files); return; }
+  let handle = null;
+  if (files.length === 1 && items[0] && items[0].getAsFileSystemHandle) {
+    try { handle = await items.find((it) => it.kind === 'file').getAsFileSystemHandle(); } catch {}
+  }
+  openDocument(files, handle);
+});
+
+// ---------------- その他のUI ----------------
+function switchTab(name) {
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
+  document.querySelectorAll('.pane').forEach((p) => p.classList.toggle('on', p.id === 'pane-' + name));
+  if ($('sidebar').classList.contains('hidden')) toggleSidebar();
+}
+document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => switchTab(b.dataset.tab));
+function toggleSidebar() {
+  $('sidebar').classList.toggle('hidden');
+  store('pdfv:sidebar', !$('sidebar').classList.contains('hidden'));
+  $('btnSidebar').classList.toggle('on', !$('sidebar').classList.contains('hidden'));
+}
+$('btnSidebar').onclick = toggleSidebar;
+
+$('btnPrev').onclick = () => stepPage(-1);
+$('btnNext').onclick = () => stepPage(1);
+function stepPage(d) {
+  if (S.view === 'single') return goTo(S.current + d);
+  const rs = rows(); const k = rs.findIndex((r) => r.includes(S.current));
+  const nr = rs[Math.max(0, Math.min(rs.length - 1, k + d))]; goTo(nr[0]);
+}
+$('pageInput').addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (e.key === 'Enter') { const n = parseInt(e.target.value.normalize('NFKC'), 10); if (n) goTo(n - 1); viewer.focus(); }
+});
+$('pageInput').addEventListener('focus', (e) => e.target.select());
+
+$('btnInvert').onclick = () => { document.body.classList.toggle('invert'); store('pdfv:invert', document.body.classList.contains('invert')); updateUI(); };
+const THEMES = ['auto', 'light', 'dark'], THEME_LABEL = { auto: '🌓 自動', light: '☀ ライト', dark: '🌙 ダーク' };
+function applyTheme(t) {
+  if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.dataset.theme = t;
+  $('btnTheme').textContent = THEME_LABEL[t];
+}
+$('btnTheme').onclick = () => { const t = THEMES[(THEMES.indexOf(load('pdfv:theme', 'auto')) + 1) % 3]; store('pdfv:theme', t); applyTheme(t); };
+$('btnFull').onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+$('btnHelp').onclick = () => $('dlgHelp').showModal();
+
+function updateUI() {
+  const has = hasDoc();
+  $('pageCount').textContent = '/ ' + S.pages.length;
+  $('pageInput').value = has ? S.current + 1 : 0;
+  ['btnSave', 'btnSaveAs', 'btnPrint', 'btnExtract', 'btnDelete', 'btnRotL', 'btnRotR', 'btnPrev', 'btnNext', 'btnZoomIn', 'btnZoomOut'].forEach((id) => $(id).disabled = !has);
+  $('btnUndo').disabled = !S.undo.length; $('btnRedo').disabled = !S.redo.length;
+  const sel = S.selected.size;
+  $('btnDelete').textContent = sel > 1 ? `🗑 削除(${sel})` : '🗑 削除';
+  const zs = $('zoomSel');
+  if (S.fit) zs.value = S.fit;
+  else {
+    const opt = [...zs.options].find((o) => +o.value && Math.abs(+o.value - S.scale) < 0.001);
+    if (opt) zs.value = opt.value;
+    else { const c = zs.querySelector('[value=custom]'); c.textContent = Math.round(S.scale * 100) + '%'; zs.value = 'custom'; }
+  }
+  $('viewSel').value = S.view;
+  $('btnInvert').classList.toggle('on', document.body.classList.contains('invert'));
+  $('docTitle').textContent = has ? (S.dirty ? '● ' : '') + S.fileName : '';
+  $('docTitle').title = has ? S.fileName + (S.dirty ? '（未保存の変更あり）' : '') : '';
+  document.title = has ? (S.dirty ? '● ' : '') + S.fileName + ' - PDFビューア' : 'PDFビューア';
+}
+
+function refreshAll() {
+  layout(); renderThumbs(); renderBookmarks(); updateUI();
+  if (S.search.q) runSearch(S.search.q);
+}
+
+// ---------------- キーボード ----------------
+document.addEventListener('keydown', (e) => {
+  const inField = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName) && document.activeElement.type !== 'checkbox';
+  const ctrl = e.ctrlKey || e.metaKey;
+  if (document.querySelector('dialog[open]')) return;
+  const k = e.key.toLowerCase();
+  if (ctrl && k === 'o') { e.preventDefault(); pickOpen(); return; }
+  if (ctrl && k === 's') { e.preventDefault(); saveDoc(e.shiftKey); return; }
+  if (ctrl && k === 'f') { e.preventDefault(); $('searchBox').focus(); $('searchBox').select(); return; }
+  if (ctrl && k === 'p') { e.preventDefault(); openPrintDialog(); return; }
+  if (e.key === 'F4') { e.preventDefault(); toggleSidebar(); return; }
+  if (inField) return;
+  if (ctrl && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if (ctrl && k === 'y') { e.preventDefault(); redo(); return; }
+  if (ctrl && k === 'b') { e.preventDefault(); addBookmark(); return; }
+  if (ctrl && (e.key === '+' || e.key === '=' || e.key === ';')) { e.preventDefault(); zoomStep(1); return; }
+  if (ctrl && e.key === '-') { e.preventDefault(); zoomStep(-1); return; }
+  if (ctrl && e.key === '0') { e.preventDefault(); setZoom(0, 'width'); return; }
+  if (ctrl && k === 'a' && $('pane-thumbs').contains(document.activeElement) || ctrl && k === 'a' && $('pane-thumbs').matches(':hover')) {
+    e.preventDefault(); S.selected = new Set(S.pages.map((p) => p.id)); syncThumbSel(); updateUI(); return;
+  }
+  if (ctrl) return;
+  if (e.key === 'F2') { e.preventDefault(); if (S.selBm) renameBm(); return; }
+  if (e.key === 'Escape') { S.selected.clear(); syncThumbSel(); updateUI(); return; }
+  if (e.key === 'Delete' && S.selected.size) { e.preventDefault(); deletePages(new Set(S.selected)); return; }
+  const horizScroll = viewer.scrollWidth > viewer.clientWidth + 2;
+  if ((e.key === 'ArrowRight' && !horizScroll) || e.key === 'PageDown') { e.preventDefault(); stepPage(1); return; }
+  if ((e.key === 'ArrowLeft' && !horizScroll) || e.key === 'PageUp') { e.preventDefault(); stepPage(-1); return; }
+  if (e.key === 'Home') { e.preventDefault(); goTo(0); return; }
+  if (e.key === 'End') { e.preventDefault(); goTo(S.pages.length - 1); return; }
+});
+
+// ---------------- 初期化 ----------------
+applyTheme(load('pdfv:theme', 'auto'));
+if (load('pdfv:invert', false)) document.body.classList.add('invert');
+if (load('pdfv:sidebar', true) === false) $('sidebar').classList.add('hidden');
+$('btnSidebar').classList.toggle('on', !$('sidebar').classList.contains('hidden'));
+S.view = load('pdfv:view', 'single');
+refreshAll();
+viewer.focus();
+
+// アプリとしてインストールできるようにする（https か localhost で開いた時だけ）
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
+  navigator.serviceWorker.register('sw.js').catch((e) => console.warn('service worker:', e));
+}
+
+// アプリとしてインストール後、PDFをダブルクリックして起動された時にそのファイルを開く
+if ('launchQueue' in window) {
+  launchQueue.setConsumer(async (p) => {
+    if (!p.files || !p.files.length) return;
+    const h = p.files[0]; openDocument([await h.getFile()], h);
+  });
+}
+</script>
+</body>
+</html>
