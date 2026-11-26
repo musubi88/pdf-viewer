@@ -620,8 +620,9 @@ function onPageVisible(entries) {
     if (en.isIntersecting) renderPage(el);
     else if (el._gen) { // 画面から遠いページはメモリ節約のため解放
       if (el._task) el._task.cancel();
+      if (el._detailTask) el._detailTask.cancel();
       el.querySelectorAll('canvas,.textLayer').forEach((c) => c.remove());
-      el._gen = 0;
+      el._gen = 0; el._detailRect = null;
     }
   }
 }
@@ -639,8 +640,9 @@ async function renderPage(el) {
     const rotation = (page.rotate + p.rot) % 360;
     const vp = page.getViewport({ scale: S.scale, rotation });
     let ratio = window.devicePixelRatio || 1;
-    const maxPx = 16e6; // 巨大な図面でキャンバスが作れなくなるのを防ぐ
-    if (vp.width * vp.height * ratio * ratio > maxPx) ratio = Math.sqrt(maxPx / (vp.width * vp.height));
+    // 巨大な図面でキャンバスが作れなくなるのを防ぐ。粗くなる分は、見えている範囲だけ後から細かく描き直す
+    el._lowRes = vp.width * vp.height * ratio * ratio > MAX_PAGE_PX;
+    if (el._lowRes) ratio = Math.sqrt(MAX_PAGE_PX / (vp.width * vp.height));
     const canvas = document.createElement('canvas');
     canvas.width = Math.floor(vp.width * ratio); canvas.height = Math.floor(vp.height * ratio);
     canvas.style.width = Math.floor(vp.width) + 'px'; canvas.style.height = Math.floor(vp.height) + 'px';
@@ -649,13 +651,62 @@ async function renderPage(el) {
     await task.promise;
     if (el._gen !== gen) return;
     el.querySelectorAll('canvas,.textLayer').forEach((c) => c.remove());
+    el._detailRect = null;
     el.appendChild(canvas);
+    if (el._lowRes) scheduleDetail();
     const tl = document.createElement('div'); tl.className = 'textLayer';
     el.appendChild(tl);
     const textDivs = [];
     await pdfjsLib.renderTextLayer({ textContentSource: await page.getTextContent(), container: tl, viewport: vp, textDivs }).promise;
     el._textDivs = textDivs;
     highlightPage(el);
+  } catch (e) {
+    if (e && e.name === 'RenderingCancelledException') return;
+    console.error(e);
+  }
+}
+
+// ---- 大きな図面を拡大した時：見えている範囲だけを画面の解像度で描き直す ----
+const MAX_PAGE_PX = 16e6;
+let detailTimer;
+function scheduleDetail() { clearTimeout(detailTimer); detailTimer = setTimeout(renderDetails, 120); }
+function renderDetails() {
+  const vr = viewer.getBoundingClientRect();
+  for (const el of pageEls) {
+    if (!el || !el._lowRes || el._gen !== S.gen) continue;
+    const r = el.getBoundingClientRect();
+    const vis = { x1: vr.left - r.left, y1: vr.top - r.top, x2: vr.right - r.left, y2: vr.bottom - r.top };
+    if (vis.x2 <= 0 || vis.y2 <= 0 || vis.x1 >= r.width || vis.y1 >= r.height) continue;
+    const d = el._detailRect;
+    if (d && d.x1 <= Math.max(0, vis.x1) && d.y1 <= Math.max(0, vis.y1) && d.x2 >= Math.min(r.width, vis.x2) && d.y2 >= Math.min(r.height, vis.y2)) continue;
+    // 少しスクロールしても描き直さずに済むよう、上下左右に余白を付けて描く
+    const mx = vr.width * 0.25, my = vr.height * 0.25;
+    renderDetail(el, Math.max(0, Math.floor(vis.x1 - mx)), Math.max(0, Math.floor(vis.y1 - my)),
+      Math.min(Math.floor(r.width), Math.ceil(vis.x2 + mx)), Math.min(Math.floor(r.height), Math.ceil(vis.y2 + my)));
+  }
+}
+async function renderDetail(el, x1, y1, x2, y2) {
+  const gen = S.gen, token = (el._detailToken || 0) + 1;
+  el._detailToken = token;
+  if (el._detailTask) el._detailTask.cancel();
+  const p = S.pages[+el.dataset.i];
+  try {
+    const page = await S.sources[p.src].pdfjs.getPage(p.idx + 1);
+    const vp = page.getViewport({ scale: S.scale, rotation: (page.rotate + p.rot) % 360 });
+    const ratio = window.devicePixelRatio || 1;
+    const canvas = document.createElement('canvas');
+    canvas.className = 'detail';
+    canvas.width = Math.round((x2 - x1) * ratio); canvas.height = Math.round((y2 - y1) * ratio);
+    Object.assign(canvas.style, { left: x1 + 'px', top: y1 + 'px', width: (x2 - x1) + 'px', height: (y2 - y1) + 'px' });
+    const task = page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, transform: [ratio, 0, 0, ratio, -x1 * ratio, -y1 * ratio] });
+    el._detailTask = task;
+    await task.promise;
+    if (gen !== S.gen || token !== el._detailToken || el._gen !== gen) return;
+    el.querySelectorAll('canvas.detail').forEach((c) => c.remove());
+    const base = el.querySelector('canvas');
+    if (!base) return;
+    base.after(canvas);
+    el._detailRect = { x1, y1, x2, y2 };
   } catch (e) {
     if (e && e.name === 'RenderingCancelledException') return;
     console.error(e);
@@ -715,7 +766,7 @@ function isInView(el, box) {
 let scrollRaf = 0;
 viewer.addEventListener('scroll', () => {
   if (scrollRaf) return;
-  scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; updateCurrent(); });
+  scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; updateCurrent(); scheduleDetail(); });
 });
 
 let saveTimer;
