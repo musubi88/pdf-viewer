@@ -1460,13 +1460,31 @@ function coverTitle(layout) {
   return null;
 }
 
-async function isDividerPage(p, layout) {
-  const t = stripNo(layout.text);
-  if (t.length < 2 || t.length > 40 || /\d/.test(t) || !/[぀-鿿]/.test(t)) return false;
+// ページに含まれる画像と図形（線・塗り）の数
+async function pageOps(p) {
   const page = await S.sources[p.src].pdfjs.getPage(p.idx + 1);
   const ops = await page.getOperatorList();
   const O = pdfjsLib.OPS;
-  return !ops.fnArray.some((f) => f === O.paintImageXObject || f === O.paintInlineImageXObject || f === O.paintImageMaskXObject || f === O.paintImageXObjectRepeat);
+  const IMG = new Set([O.paintImageXObject, O.paintInlineImageXObject, O.paintImageMaskXObject, O.paintImageXObjectRepeat]);
+  let img = 0, path = 0;
+  for (const f of ops.fnArray) { if (IMG.has(f)) img++; else if (f === O.constructPath) path++; }
+  return { img, path };
+}
+
+async function isDividerPage(p, layout) {
+  const t = stripNo(layout.text);
+  if (t.length < 2 || t.length > 40 || /\d/.test(t) || !/[぀-鿿]/.test(t)) return false;
+  return !(await pageOps(p)).img;
+}
+
+const BLANK_DIVIDER_MAX_PATHS = 100; // 扉ページの図形化された文字はこれより少ない（グラフ等の図面ページを除くため）
+const bigrams = (s) => { const b = new Set(); for (let i = 0; i < s.length - 1; i++) b.add(s.slice(i, i + 2)); return b; };
+// 目次の見出しと、扉ページに続く資料の文字がどれだけ似ているか（0〜1、写真の章は画像の有無も考慮）
+function sectionScore(title, sec) {
+  const tb = bigrams(stripNo(compact(title)));
+  if (!tb.size) return 0;
+  let hit = 0; tb.forEach((g) => { if (sec.text.includes(g)) hit++; });
+  return hit / tb.size + (/写真/.test(title) && sec.img ? 1 : 0);
 }
 
 // 目次がない場合：本文より目立つ書体の番号付き行を、番号が連番になるものだけ見出しとして拾う
@@ -1569,22 +1587,51 @@ async function detectBookmarks(useToc = true) {
   // 巻末資料
   const backFrom = rootPage >= 0 ? rootPage + 1 : lastBody + 1;
   const children = [];
-  for (const t of toc.back) {
+  let missing = [], rootStatus = 'ok';
+  toc.back.forEach((t, order) => {
     const key = stripNo(compact(t));
     let pg = -1;
     for (let i = backFrom; i < n; i++) if (sameChars(stripNo(layouts[i].text), key)) { pg = i; break; }
-    if (pg >= 0) children.push({ title: t, page: pg });
-    else notes.push(`巻末資料「${t}」の扉ページが見つかりませんでした。`);
+    if (pg >= 0) children.push({ title: t, page: pg, order, status: 'ok' }); else missing.push({ title: t, order });
+  });
+  // 扉ページの文字が図形になっていて読めない報告書：文字のない扉ページを探し、続く資料の内容から見出しを当てはめる
+  if (missing.length) {
+    const blanks = [];
+    for (let i = Math.max(lastBody, rootPage) + 1; i < n; i++) {
+      if (layouts[i].text.length || children.some((c) => c.page === i)) continue;
+      const o = await pageOps(S.pages[i]);
+      if (!o.img && o.path <= BLANK_DIVIDER_MAX_PATHS) blanks.push(i);
+    }
+    if (rootPage < 0 && blanks.length >= 2 && blanks[1] === blanks[0] + 1) { rootPage = blanks.shift(); rootStatus = 'est'; }
+    const sections = [];
+    for (let k = 0; k < blanks.length; k++) {
+      const end = Math.min(k + 1 < blanks.length ? blanks[k + 1] : n, blanks[k] + 3);
+      let text = '', img = false;
+      for (let i = blanks[k] + 1; i < end; i++) { text += layouts[i].text; img = img || (await pageOps(S.pages[i])).img > 0; }
+      sections.push({ page: blanks[k], text, img });
+    }
+    const pairs = [];
+    missing.forEach((m) => sections.forEach((s) => pairs.push({ m, s, score: sectionScore(m.title, s) })));
+    pairs.sort((a, b) => b.score - a.score);
+    const usedM = new Set(), usedS = new Set();
+    for (const p of pairs) {
+      if (p.score < 0.2 || usedM.has(p.m) || usedS.has(p.s)) continue;
+      usedM.add(p.m); usedS.add(p.s);
+      children.push({ title: p.m.title, page: p.s.page, order: p.m.order, status: 'est' });
+    }
+    if (usedM.size) notes.push('巻末資料の扉ページは文字が図形になっていて読み取れないため、続く資料の内容から見出しを当てはめました（「推定」の行）。');
+    missing = missing.filter((m) => !usedM.has(m));
   }
+  missing.forEach((m) => notes.push(`巻末資料「${m.title}」の扉ページが見つかりませんでした。PDFに含まれているか確認してください。`));
   if (!toc.back.length && rootPage >= 0) {
     for (let i = backFrom; i < n; i++) {
-      if (await isDividerPage(S.pages[i], layouts[i])) children.push({ title: layouts[i].text, page: i });
+      if (await isDividerPage(S.pages[i], layouts[i])) children.push({ title: layouts[i].text, page: i, status: 'ok' });
     }
   }
-  if (children.some((c, k) => k > 0 && c.page < children[k - 1].page)) notes.push('巻末資料の並びが目次と実際のページで異なるため、実際のページ順にしました。');
   children.sort((a, b) => a.page - b.page);
-  if (rootPage >= 0) add('巻末資料', 1, rootPage);
-  children.forEach((c) => add(c.title, rootPage >= 0 ? 2 : 1, c.page));
+  if (children.some((c, k) => k > 0 && c.order < children[k - 1].order)) notes.push('巻末資料の並びが目次と実際のページで異なるため、実際のページ順にしました。');
+  if (rootPage >= 0) add('巻末資料', 1, rootPage, rootStatus);
+  children.forEach((c) => add(c.title, rootPage >= 0 ? 2 : 1, c.page, c.status));
   return { rows, notes };
 }
 
