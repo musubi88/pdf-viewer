@@ -106,8 +106,13 @@ body.resizing #viewer, body.resizing #sidebar { pointer-events: none; }
 .row { display: flex; gap: 8px; justify-content: center; }
 .page { position: relative; background: #fff; box-shadow: var(--shadow); flex: none; }
 .page canvas { display: block; position: absolute; left: 0; top: 0; }
+/* 画面の画素と1対1で描いた画像は、ブラウザの補間（ぼかし）をかけずにそのまま出す */
+.page canvas.exact { image-rendering: pixelated; }
 .page .pnum { position: absolute; right: 100%; top: 0; margin-right: 6px; font-size: 11px; color: var(--muted); }
 body.invert .page canvas, body.invert .thumb canvas { filter: invert(1) hue-rotate(180deg); }
+/* 文字・線を濃く：中間の灰色（文字のふち・細線）を黒寄りにする。写真のあるページは対象外 */
+body.crisp .page:not(.photo) canvas { filter: url(#crisp); }
+body.crisp.invert .page:not(.photo) canvas { filter: url(#crisp) invert(1) hue-rotate(180deg); }
 body.invert .page, body.invert .thumb .tbox { background: #000; }
 #empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted); text-align: center; pointer-events: none; }
 #empty .big { font-size: 18px; color: var(--text); }
@@ -373,6 +378,15 @@ dialog label { display: flex; align-items: center; gap: 6px; }
         <option value="last">前回のまま（ファイルごとに記憶）</option>
       </select>
     </label>
+    <label>文字・線の濃さ
+      <select id="crispSel">
+        <option value="0">元のまま</option>
+        <option value="1.5">少し濃く</option>
+        <option value="1.8">濃く</option>
+        <option value="2.3">かなり濃く</option>
+      </select>
+    </label>
+    <div class="hint" style="padding:0">細い文字や線を見やすくします。写真を含むページには効きません。印刷・保存には影響しません。</div>
     <div class="hint" style="padding:0">ページの削除・回転・並べ替え・結合・しおりの変更は「保存」するまでファイルには反映されません。前回見ていたページはファイルごとに記憶されます。</div>
   </div>
   <div class="foot"><button class="primary" data-close>閉じる</button></div>
@@ -383,6 +397,11 @@ dialog label { display: flex; align-items: center; gap: 6px; }
 <div id="toast"></div>
 <div id="busy"><span id="busyMsg">処理中…</span></div>
 <div id="printArea"></div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="crisp" color-interpolation-filters="sRGB">
+    <feComponentTransfer><feFuncR type="gamma" exponent="1.8"/><feFuncG type="gamma" exponent="1.8"/><feFuncB type="gamma" exponent="1.8"/></feComponentTransfer>
+  </filter>
+</svg>
 
 <script>
 'use strict';
@@ -664,15 +683,20 @@ async function renderPage(el) {
     el._lowRes = vp.width * vp.height * ratio * ratio > MAX_PAGE_PX;
     if (el._lowRes) ratio = Math.sqrt(MAX_PAGE_PX / (vp.width * vp.height));
     const canvas = document.createElement('canvas');
-    canvas.width = Math.floor(vp.width * ratio); canvas.height = Math.floor(vp.height * ratio);
-    canvas.style.width = Math.floor(vp.width) + 'px'; canvas.style.height = Math.floor(vp.height) + 'px';
-    const task = page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : null });
+    // 画面上の大きさ（CSS px × 画面の倍率）と画像の画素数をそろえる。ずれると拡大縮小されてにじむ
+    const cssW = Math.floor(vp.width), cssH = Math.floor(vp.height);
+    canvas.width = Math.round(cssW * ratio); canvas.height = Math.round(cssH * ratio);
+    canvas.style.width = cssW + 'px'; canvas.style.height = cssH + 'px';
+    if (!el._lowRes) canvas.className = 'exact';
+    const sx = canvas.width / vp.width, sy = canvas.height / vp.height;
+    const task = page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, transform: [sx, 0, 0, sy, 0, 0] });
     el._task = task;
     await task.promise;
     if (el._gen !== gen) return;
     el.querySelectorAll('canvas,.textLayer').forEach((c) => c.remove());
     el._detailRect = null;
     el.appendChild(canvas);
+    el.classList.toggle('photo', await hasImage(page));
     if (el._lowRes) scheduleDetail();
     const tl = document.createElement('div'); tl.className = 'textLayer';
     el.appendChild(tl);
@@ -684,6 +708,21 @@ async function renderPage(el) {
     if (e && e.name === 'RenderingCancelledException') return;
     console.error(e);
   }
+}
+
+// 画像（写真など）を含むページか。描画直後なら pdf.js が解析結果を持っているので軽い
+async function hasImage(page) {
+  try {
+    const ops = await page.getOperatorList({ annotationMode: pdfjsLib.AnnotationMode.ENABLE_FORMS });
+    const O = pdfjsLib.OPS;
+    return ops.fnArray.some((f) => f === O.paintImageXObject || f === O.paintInlineImageXObject || f === O.paintImageXObjectRepeat);
+  } catch { return false; }
+}
+
+// ---- 文字・線の濃さ ----
+function applyCrisp(v) {
+  document.body.classList.toggle('crisp', v !== '0');
+  if (v !== '0') document.querySelectorAll('#crisp feComponentTransfer > *').forEach((f) => f.setAttribute('exponent', v));
 }
 
 // ---- 大きな図面を拡大した時：見えている範囲だけを画面の解像度で描き直す ----
@@ -725,7 +764,7 @@ async function renderDetail(el, x1, y1, x2, y2) {
     const vp = page.getViewport({ scale: S.scale, rotation: (page.rotate + p.rot) % 360 });
     const ratio = window.devicePixelRatio || 1;
     const canvas = document.createElement('canvas');
-    canvas.className = 'detail';
+    canvas.className = 'detail exact';
     canvas.width = Math.round((x2 - x1) * ratio); canvas.height = Math.round((y2 - y1) * ratio);
     Object.assign(canvas.style, { left: x1 + 'px', top: y1 + 'px', width: (x2 - x1) + 'px', height: (y2 - y1) + 'px' });
     const task = page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, transform: [ratio, 0, 0, ratio, -x1 * ratio, -y1 * ratio] });
@@ -1927,6 +1966,9 @@ $('btnFull').onclick = () => document.fullscreenElement ? document.exitFullscree
 $('btnHelp').onclick = () => $('dlgHelp').showModal();
 $('openZoom').value = load('pdfv:openZoom', '1');
 $('openZoom').onchange = (e) => store('pdfv:openZoom', e.target.value);
+$('crispSel').value = load('pdfv:crisp', '1.5');
+applyCrisp($('crispSel').value);
+$('crispSel').onchange = (e) => { store('pdfv:crisp', e.target.value); applyCrisp(e.target.value); };
 
 function updateUI() {
   const has = hasDoc();
