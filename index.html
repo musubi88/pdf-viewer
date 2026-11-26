@@ -106,8 +106,6 @@ body.resizing #viewer, body.resizing #sidebar { pointer-events: none; }
 .row { display: flex; gap: 8px; justify-content: center; }
 .page { position: relative; background: #fff; box-shadow: var(--shadow); flex: none; }
 .page canvas { display: block; position: absolute; left: 0; top: 0; }
-/* 画面の画素と1対1で描いた画像は、ブラウザの補間（ぼかし）をかけずにそのまま出す */
-.page canvas.exact { image-rendering: pixelated; }
 .page .pnum { position: absolute; right: 100%; top: 0; margin-right: 6px; font-size: 11px; color: var(--muted); }
 body.invert .page canvas, body.invert .thumb canvas { filter: invert(1) hue-rotate(180deg); }
 /* 文字・線を濃く：中間の灰色（文字のふち・細線）を黒寄りにする。写真のあるページは対象外 */
@@ -594,22 +592,25 @@ function dispSize(p) {
   return r % 180 ? { w: s.h, h: s.w } : { w: s.w, h: s.h };
 }
 
+const PDF_TO_CSS = 96 / 72;
+
 function computeFitScale(mode) {
   if (!hasDoc()) return 1;
   const p = S.pages[Math.max(0, S.current)];
   const d = dispSize(p);
-  let w = d.w, h = d.h;
+  let w = d.w, h = d.h, gap = 0;
   if (S.view !== 'single') {
     // 見開きの場合は2ページ分の幅
     const row = rows().find((r) => r.includes(S.current)) || [S.current];
-    w = row.reduce((a, i) => a + dispSize(S.pages[i]).w, 0) + (row.length - 1) * 8;
+    w = row.reduce((a, i) => a + dispSize(S.pages[i]).w, 0);
+    gap = (row.length - 1) * 8;
     h = Math.max(...row.map((i) => dispSize(S.pages[i]).h));
   }
   const availW = viewer.clientWidth - 32 - 24;
   const availH = viewer.clientHeight - 32;
   if (availW <= 0 || availH <= 0) return S.scale > 0 ? S.scale : 1; // 画面が非表示のとき
-  const sw = availW / w;
-  return Math.max(0.1, mode === 'page' ? Math.min(sw, availH / h) : sw);
+  const sw = (availW - gap) / (w * PDF_TO_CSS);
+  return Math.max(0.1, mode === 'page' ? Math.min(sw, availH / (h * PDF_TO_CSS)) : sw);
 }
 
 function rows() {
@@ -638,9 +639,9 @@ function layout(keepPos = true) {
       const d = dispSize(p);
       const el = document.createElement('div');
       el.className = 'page';
-      el.style.width = Math.floor(d.w * S.scale) + 'px';
-      el.style.height = Math.floor(d.h * S.scale) + 'px';
-      el.style.setProperty('--scale-factor', S.scale);
+      el.style.width = Math.floor(d.w * S.scale * PDF_TO_CSS) + 'px';
+      el.style.height = Math.floor(d.h * S.scale * PDF_TO_CSS) + 'px';
+      el.style.setProperty('--scale-factor', S.scale * PDF_TO_CSS);
       el.dataset.i = i;
       if (S.view === 'single') { const n = document.createElement('div'); n.className = 'pnum'; n.textContent = i + 1; el.appendChild(n); }
       row.appendChild(el);
@@ -677,7 +678,7 @@ async function renderPage(el) {
     const page = await src.pdfjs.getPage(p.idx + 1);
     if (el._gen !== gen) return;
     const rotation = (page.rotate + p.rot) % 360;
-    const vp = page.getViewport({ scale: S.scale, rotation });
+    const vp = page.getViewport({ scale: S.scale * PDF_TO_CSS, rotation });
     let ratio = window.devicePixelRatio || 1;
     // 巨大な図面でキャンバスが作れなくなるのを防ぐ。粗くなる分は、見えている範囲だけ後から細かく描き直す
     el._lowRes = vp.width * vp.height * ratio * ratio > MAX_PAGE_PX;
@@ -687,9 +688,8 @@ async function renderPage(el) {
     const cssW = Math.floor(vp.width), cssH = Math.floor(vp.height);
     canvas.width = Math.round(cssW * ratio); canvas.height = Math.round(cssH * ratio);
     canvas.style.width = cssW + 'px'; canvas.style.height = cssH + 'px';
-    if (!el._lowRes) canvas.className = 'exact';
     const sx = canvas.width / vp.width, sy = canvas.height / vp.height;
-    const task = page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, transform: [sx, 0, 0, sy, 0, 0] });
+    const task = page.render({ canvasContext: canvas.getContext('2d', { alpha: false }), viewport: vp, transform: [sx, 0, 0, sy, 0, 0] });
     el._task = task;
     await task.promise;
     if (el._gen !== gen) return;
@@ -761,13 +761,13 @@ async function renderDetail(el, x1, y1, x2, y2) {
   const p = S.pages[+el.dataset.i];
   try {
     const page = await S.sources[p.src].pdfjs.getPage(p.idx + 1);
-    const vp = page.getViewport({ scale: S.scale, rotation: (page.rotate + p.rot) % 360 });
+    const vp = page.getViewport({ scale: S.scale * PDF_TO_CSS, rotation: (page.rotate + p.rot) % 360 });
     const ratio = window.devicePixelRatio || 1;
     const canvas = document.createElement('canvas');
-    canvas.className = 'detail exact';
+    canvas.className = 'detail';
     canvas.width = Math.round((x2 - x1) * ratio); canvas.height = Math.round((y2 - y1) * ratio);
     Object.assign(canvas.style, { left: x1 + 'px', top: y1 + 'px', width: (x2 - x1) + 'px', height: (y2 - y1) + 'px' });
-    const task = page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, transform: [ratio, 0, 0, ratio, -x1 * ratio, -y1 * ratio] });
+    const task = page.render({ canvasContext: canvas.getContext('2d', { alpha: false }), viewport: vp, transform: [ratio, 0, 0, ratio, -x1 * ratio, -y1 * ratio] });
     el._detailTask = task;
     await task.promise;
     if (gen !== S.gen || token !== el._detailToken || el._gen !== gen) return;
@@ -1966,9 +1966,9 @@ $('btnFull').onclick = () => document.fullscreenElement ? document.exitFullscree
 $('btnHelp').onclick = () => $('dlgHelp').showModal();
 $('openZoom').value = load('pdfv:openZoom', '1');
 $('openZoom').onchange = (e) => store('pdfv:openZoom', e.target.value);
-$('crispSel').value = load('pdfv:crisp', '1.5');
+$('crispSel').value = load('pdfv:crispV2', '0');
 applyCrisp($('crispSel').value);
-$('crispSel').onchange = (e) => { store('pdfv:crisp', e.target.value); applyCrisp(e.target.value); };
+$('crispSel').onchange = (e) => { store('pdfv:crispV2', e.target.value); applyCrisp(e.target.value); };
 
 function updateUI() {
   const has = hasDoc();
