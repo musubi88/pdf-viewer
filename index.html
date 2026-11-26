@@ -123,6 +123,10 @@ body.invert .page, body.invert .thumb .tbox { background: #000; }
 .textLayer[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }
 .textLayer span.hl { background: var(--hl); border-radius: 2px; }
 .textLayer span.hl-cur { background: var(--hl-cur); }
+/* 手のひらツール：文字の選択を止めて、ドラッグでページを動かす */
+body.hand #viewer { cursor: grab; }
+body.hand #viewer .textLayer { pointer-events: none; }
+body.panning, body.panning #viewer { cursor: grabbing; user-select: none; }
 
 /* ドロップ・ダイアログ・通知 */
 #drop { position: fixed; inset: 0; display: none; z-index: 50; background: rgba(20, 30, 50, .55); padding: 30px; gap: 20px; }
@@ -193,6 +197,10 @@ dialog label { display: flex; align-items: center; gap: 6px; }
     <button id="btnRotR" title="選択ページを右回転" disabled>⟳</button>
     <button id="btnUndo" title="元に戻す (Ctrl+Z)" disabled>↶</button>
     <button id="btnRedo" title="やり直し (Ctrl+Y)" disabled>↷</button>
+  </div>
+  <div class="grp">
+    <button id="btnSelectTool" title="選択ツール (V)：文字の選択・コピー">↖</button>
+    <button id="btnHandTool" title="手のひらツール (H)：ドラッグでページを動かす。Spaceキーを押している間も使えます">✋</button>
   </div>
   <div class="grp">
     <button id="btnPrev" title="前のページ (←)">◀</button>
@@ -352,6 +360,8 @@ dialog label { display: flex; align-items: center; gap: 6px; }
       <tr><td>Delete</td><td>サムネイルで選択したページを削除</td></tr>
       <tr><td>Ctrl+A</td><td>（サムネイル上）全ページを選択</td></tr>
       <tr><td>Ctrl+Z / Ctrl+Y</td><td>元に戻す／やり直し</td></tr>
+      <tr><td>H / V</td><td>手のひらツール／選択ツールに切り替え</td></tr>
+      <tr><td>Space（押している間）</td><td>一時的に手のひらツール</td></tr>
       <tr><td>F4</td><td>サイドバーの表示切替</td></tr>
       <tr><td>Esc</td><td>ページ選択の解除</td></tr>
     </table>
@@ -668,8 +678,15 @@ async function renderPage(el) {
 
 // ---- 大きな図面を拡大した時：見えている範囲だけを画面の解像度で描き直す ----
 const MAX_PAGE_PX = 16e6;
+const DETAIL_MAX_PX = 32e6; // 描き直す範囲の上限。広く描いておくほど、移動しても描き直しが起きにくい
 let detailTimer;
-function scheduleDetail() { clearTimeout(detailTimer); detailTimer = setTimeout(renderDetails, 120); }
+function scheduleDetail() { clearTimeout(detailTimer); detailTimer = setTimeout(renderDetails, 80); }
+// 中心 c・長さ size の範囲を 0〜max に収める（はみ出した分は反対側へずらして、描く面積を無駄にしない）
+function fitSpan(c, size, max) {
+  size = Math.min(size, max);
+  const a = Math.max(0, Math.min(max - size, c - size / 2));
+  return [Math.floor(a), Math.min(Math.floor(max), Math.ceil(a + size))];
+}
 function renderDetails() {
   const vr = viewer.getBoundingClientRect();
   for (const el of pageEls) {
@@ -679,10 +696,13 @@ function renderDetails() {
     if (vis.x2 <= 0 || vis.y2 <= 0 || vis.x1 >= r.width || vis.y1 >= r.height) continue;
     const d = el._detailRect;
     if (d && d.x1 <= Math.max(0, vis.x1) && d.y1 <= Math.max(0, vis.y1) && d.x2 >= Math.min(r.width, vis.x2) && d.y2 >= Math.min(r.height, vis.y2)) continue;
-    // 少しスクロールしても描き直さずに済むよう、上下左右に余白を付けて描く
-    const mx = vr.width * 0.25, my = vr.height * 0.25;
-    renderDetail(el, Math.max(0, Math.floor(vis.x1 - mx)), Math.max(0, Math.floor(vis.y1 - my)),
-      Math.min(Math.floor(r.width), Math.ceil(vis.x2 + mx)), Math.min(Math.floor(r.height), Math.ceil(vis.y2 + my)));
+    // 画面の周りも上限の面積いっぱいまで（最大で画面の4倍の幅・高さ）まとめて描いておく
+    const ratio = window.devicePixelRatio || 1;
+    const vw = Math.min(vr.width, r.width), vh = Math.min(vr.height, r.height);
+    const grow = Math.min(4, Math.max(1.5, Math.sqrt(DETAIL_MAX_PX / (vw * vh * ratio * ratio))));
+    const [x1, x2] = fitSpan((vis.x1 + vis.x2) / 2, vw * grow, r.width);
+    const [y1, y2] = fitSpan((vis.y1 + vis.y2) / 2, vh * grow, r.height);
+    renderDetail(el, x1, y1, x2, y2);
   }
 }
 async function renderDetail(el, x1, y1, x2, y2) {
@@ -1946,6 +1966,9 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault(); S.selected = new Set(S.pages.map((p) => p.id)); syncThumbSel(); updateUI(); return;
   }
   if (ctrl) return;
+  if (k === 'h') { setHand(true); return; }
+  if (k === 'v') { setHand(false); return; }
+  if (e.key === ' ') { e.preventDefault(); if (!spaceHand) { spaceHand = true; applyHand(); } return; }
   if (e.key === 'F2') { e.preventDefault(); if (S.selBm) renameBm(); return; }
   if (e.key === 'Escape') { S.selected.clear(); syncThumbSel(); updateUI(); return; }
   if (e.key === 'Delete' && S.selected.size) { e.preventDefault(); deletePages(new Set(S.selected)); return; }
@@ -1956,7 +1979,37 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'End') { e.preventDefault(); goTo(S.pages.length - 1); return; }
 });
 
+// ---------------- 手のひらツール ----------------
+let handMode = load('pdfv:hand', false), spaceHand = false;
+function applyHand() {
+  document.body.classList.toggle('hand', handMode || spaceHand);
+  $('btnSelectTool').classList.toggle('on', !handMode);
+  $('btnHandTool').classList.toggle('on', handMode);
+}
+function setHand(on) { handMode = on; store('pdfv:hand', on); applyHand(); }
+$('btnSelectTool').onclick = () => setHand(false);
+$('btnHandTool').onclick = () => setHand(true);
+document.addEventListener('keyup', (e) => { if (e.key === ' ' && spaceHand) { spaceHand = false; applyHand(); } });
+window.addEventListener('blur', () => { if (spaceHand) { spaceHand = false; applyHand(); } });
+viewer.addEventListener('pointerdown', (e) => {
+  if (!document.body.classList.contains('hand') || e.button !== 0 || !hasDoc()) return;
+  const r = viewer.getBoundingClientRect();
+  if (e.clientX - r.left >= viewer.clientWidth || e.clientY - r.top >= viewer.clientHeight) return; // スクロールバーの上
+  e.preventDefault();
+  viewer.focus();
+  viewer.setPointerCapture(e.pointerId);
+  const sx = e.clientX, sy = e.clientY, sl = viewer.scrollLeft, st = viewer.scrollTop;
+  document.body.classList.add('panning');
+  const move = (ev) => { viewer.scrollLeft = sl - (ev.clientX - sx); viewer.scrollTop = st - (ev.clientY - sy); };
+  const up = () => {
+    viewer.removeEventListener('pointermove', move); viewer.removeEventListener('pointerup', up); viewer.removeEventListener('pointercancel', up);
+    document.body.classList.remove('panning');
+  };
+  viewer.addEventListener('pointermove', move); viewer.addEventListener('pointerup', up); viewer.addEventListener('pointercancel', up);
+});
+
 // ---------------- 初期化 ----------------
+applyHand();
 applyTheme(load('pdfv:theme', 'auto'));
 if (load('pdfv:invert', false)) document.body.classList.add('invert');
 if (load('pdfv:sidebar', true) === false) $('sidebar').classList.add('hidden');
